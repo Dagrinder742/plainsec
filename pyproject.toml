@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "plainsec"
+version = "0.1.0"
+description = "Plain-English security reports for code projects: explains what bandit, gitleaks, osv-scanner and pip-audit found, and what to do about it."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Casey Vaughan" }]
+requires-python = ">=3.9"
+dependencies = []          # standard library only; the scanners are optional
+keywords = ["security", "bandit", "gitleaks", "osv-scanner", "pip-audit", "beginner"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Environment :: Console",
+    "Topic :: Security",
+    "Intended Audience :: Developers",
+]
+
+[project.optional-dependencies]
+# Python-installable scanners. gitleaks and osv-scanner are separate programs
+# (see the README for how to install them).
+scanners = ["bandit", "pip-audit"]
+
+[project.scripts]
+plainsec = "plainsec:main"
+
+[project.urls]
+Homepage = "https://github.com/Dagrinder742/plainsec"
+Issues = "https://github.com/Dagrinder742/plainsec/issues"
+
+[tool.setuptools]
+py-modules = ["plainsec"]

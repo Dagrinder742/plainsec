@@ -1,0 +1,56 @@
+# Runs plainsec's own tests, then a plainsec report on this repo, on every push.
+# The report shows up on the run's summary page and as a downloadable file.
+# To use it in your own repo: copy this file into .github/workflows/ and delete
+# the "Run plainsec's own tests" step.
+name: plainsec
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # full history, so gitleaks can check old commits
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run plainsec's own tests
+        run: python -m unittest test_plainsec -v
+
+      - name: Install scanners
+        run: |
+          pip install bandit pip-audit
+          # gitleaks: official release, checksum-verified
+          GL_VER=$(curl -sSfL https://api.github.com/repos/gitleaks/gitleaks/releases/latest | python -c "import json,sys; print(json.load(sys.stdin)['tag_name'].lstrip('v'))")
+          curl -sSfLO "https://github.com/gitleaks/gitleaks/releases/download/v${GL_VER}/gitleaks_${GL_VER}_linux_x64.tar.gz"
+          curl -sSfLO "https://github.com/gitleaks/gitleaks/releases/download/v${GL_VER}/gitleaks_${GL_VER}_checksums.txt"
+          sha256sum --check --ignore-missing "gitleaks_${GL_VER}_checksums.txt"
+          tar -xzf "gitleaks_${GL_VER}_linux_x64.tar.gz" gitleaks && sudo mv gitleaks /usr/local/bin/
+          # osv-scanner: official release, checksum-verified
+          curl -sSfLO https://github.com/google/osv-scanner/releases/latest/download/osv-scanner_linux_amd64
+          curl -sSfLO https://github.com/google/osv-scanner/releases/latest/download/osv-scanner_SHA256SUMS
+          sha256sum --check --ignore-missing osv-scanner_SHA256SUMS
+          chmod +x osv-scanner_linux_amd64 && sudo mv osv-scanner_linux_amd64 /usr/local/bin/osv-scanner
+          gitleaks version; osv-scanner --version | head -1
+
+      - name: plainsec report
+        run: |
+          pip install .
+          # plainsec exits 1 when it finds anything; the report is informational,
+          # so that doesn't fail the build here.
+          plainsec . --out report.md --no-save || true
+          cat report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plainsec-report
+          path: report.md
