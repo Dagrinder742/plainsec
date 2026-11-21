@@ -689,6 +689,7 @@ def osv_pkg(name, version, eco, vulns, groups):
 
 
 REAL_CARGO_SHIPPING = plainsec.cargo_shipping
+REAL_CARGO_VIA = plainsec.cargo_via
 
 
 class TestOsvScanner(unittest.TestCase):
@@ -700,6 +701,9 @@ class TestOsvScanner(unittest.TestCase):
         self.no_cargo = mock.patch.object(plainsec, "cargo_shipping", return_value=None)
         self.no_cargo.start()
         self.addCleanup(self.no_cargo.stop)
+        self.no_via = mock.patch.object(plainsec, "cargo_via", return_value=None)
+        self.no_via.start()
+        self.addCleanup(self.no_via.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.dir = Path(self.tmp.name)
         self.state = tempfile.TemporaryDirectory()
@@ -778,7 +782,7 @@ class TestOsvScanner(unittest.TestCase):
         self.assertIn("`curve25519-dalek` isn't in your Cargo.toml", out)
         # every printed command works wherever it's pasted: it cd's first
         self.assertIn(f"run `cd {plainsec.shell_path(self.dir / 'app/program')} && "
-                      "cargo tree -i curve25519-dalek@3.2.0`, then update", out)
+                      "cargo tree -i curve25519-dalek@3.2.0 --depth 1`, then update", out)
         self.assertIn("`pip install 'anyio>=4.10.0'`, then update its pin in "
                       f"`{plainsec.display_path(self.dir / '_archive/android/requirements.txt')}`", out)
         self.assertIn("nofix 1.0.0** · CRITICAL", out)
@@ -863,7 +867,7 @@ class TestOsvScanner(unittest.TestCase):
         base = {"ecosystem": "crates.io", "source": "app/program/Cargo.lock"}
         t = plainsec.dep_how(dict(base, name="rustls", version="0.21.12", fix_to="0.23.46", direct=False))
         self.assertIn("isn't in your Cargo.toml", t)
-        self.assertIn("`cargo tree -i rustls@0.21.12`", t)
+        self.assertIn("`cargo tree -i rustls@0.21.12 --depth 1`", t)
         self.assertNotIn("raise", t)
         self.assertNotIn("solana", t)                      # not a Solana project here
         t = plainsec.dep_how(dict(base, name="rustls", version="0.21.12", fix_to="0.23.46",
@@ -881,6 +885,35 @@ class TestOsvScanner(unittest.TestCase):
         _, out = self.run_cli()
         self.assertIn(f"raise `curve25519-dalek` to 4.1.3 in `{plainsec.display_path(prog / 'Cargo.toml')}`, "
                       f"then run `cd {plainsec.shell_path(prog)} && cargo update -p curve25519-dalek`", out)
+
+    # ---- which of YOUR crates pulls a crate in (real trinity_master case) ----
+    # Excerpt of `cargo tree -i borsh@0.10.4 -e no-dev --prefix none --format {p}`
+    # shape; the full tree was 846 lines.
+    REAL_INVERSE = ("borsh v0.10.4\nkaigan v0.2.6\nsolana-config-program-client v0.0.2\n"
+                    "solana-borsh v2.2.1\nsolana-program v2.3.0\n"
+                    "soldier_fund v0.1.0 (/home/u/tm/soldier_fund/program)\n"
+                    "solana-program v2.3.0 (*)\nsolana-pubkey v2.4.0\n")
+
+    def test_cargo_via_finds_your_crate(self):
+        direct = {"solana-program", "borsh-derive", "solana-program-test"}
+        with mock.patch.object(plainsec.shutil, "which", return_value="/usr/bin/cargo"), \
+             mock.patch.object(plainsec.subprocess, "run",
+                               return_value=mock.Mock(returncode=0, stdout=self.REAL_INVERSE)) as run:
+            via = REAL_CARGO_VIA(self.dir, "p/Cargo.lock", "borsh", "0.10.4", direct, ships=True)
+        self.assertEqual(via, ["solana-program"])
+        cmd = run.call_args[0][0]
+        self.assertIn("-i", cmd)
+        self.assertEqual(cmd[cmd.index("-e") + 1], "no-dev")      # shipping: no dev paths
+        with mock.patch.object(plainsec.shutil, "which", return_value=None):
+            self.assertIsNone(REAL_CARGO_VIA(self.dir, "p/Cargo.lock", "borsh", "0.10.4", direct))
+
+    def test_dep_how_names_the_crate_to_update(self):
+        d = {"ecosystem": "crates.io", "source": "p/Cargo.lock", "name": "borsh",
+             "version": "0.10.4", "fix_to": "1.0.0", "direct": False, "via": ["solana-program"]}
+        t = plainsec.dep_how(d)
+        self.assertIn("comes in through `solana-program` (which is in your Cargo.toml)", t)
+        self.assertIn("still uses borsh 0.10.4, there's nothing to do on your side", t)
+        self.assertNotIn("cargo tree", t)
 
     # ---- tests-only vs ships (cargo tree -e no-dev), real output format ----
     REAL_TREE = ("borsh v0.10.4\nborsh v0.10.4 (*)\nborsh v1.8.1\ncurve25519-dalek v4.1.3\n"

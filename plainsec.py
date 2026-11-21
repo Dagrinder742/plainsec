@@ -543,6 +543,37 @@ def cargo_shipping(root, source):
     return ship
 
 
+def cargo_via(root, source, name, version, direct, ships=None):
+    """Which crates from YOUR Cargo.toml pull in name@version. Real case:
+    `cargo tree -i borsh@0.10.4` printed 846 lines; the answer a beginner
+    needs is one name (solana-program). Shipping crates are traced without
+    dev-dependencies, so the answer is the crate that puts it in the program.
+    Returns a sorted list, or None if cargo is missing or fails."""
+    if shutil.which("cargo") is None or not direct:
+        return None
+    folder = (Path(root) / source).parent if root else Path(source).parent
+    cmd = ["cargo", "tree", "-i", f"{name}@{version}", "--target", "all",
+           "--prefix", "none", "--format", "{p}", "--locked"]
+    if ships:
+        cmd[3:3] = ["-e", "no-dev"]
+    try:
+        proc = subprocess.run(cmd, cwd=folder, capture_output=True, text=True,
+                              timeout=120)  # list form, no shell
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    me = name.replace("_", "-").lower()
+    found = set()
+    for line in proc.stdout.splitlines():
+        m = re.match(r"\s*(\S+) v\S+", line)
+        if m:
+            n = m.group(1).replace("_", "-").lower()
+            if n != me and n in direct:
+                found.add(n)
+    return sorted(found)
+
+
 def dep_how(d, root=None):
     """Ecosystem-specific upgrade advice."""
     if d.get("ships") is False:
@@ -592,9 +623,18 @@ def _dep_how(d, root=None):
         if d.get("direct"):
             return (f"raise `{name}` to {target} in {toml}, then run "
                     f"`{pre}cargo update -p {name}`{loc} (a bigger version jump can need code changes)")
+        via = d.get("via")
+        if via:
+            names = ", ".join(f"`{v}`" for v in via[:3]) + (" and others" if len(via) > 3 else "")
+            one = len(via) == 1
+            return (f"`{name}` isn't in your Cargo.toml: it comes in through {names} "
+                    f"({'which is' if one else 'which are'} in your Cargo.toml). Updating "
+                    f"{'that crate' if one else 'those crates'} is how it gets fixed. If the "
+                    f"newest version still uses {name} {d['version']}, there's nothing to do "
+                    "on your side but wait for its authors.")
         return (f"`{name}` isn't in your Cargo.toml: another crate pulls it in. To see "
-                f"which, run `{pre}cargo tree -i {name}@{d['version']}`{loc}, then update that "
-                "crate instead" + (" (here that's usually one of your solana / anchor crates)"
+                f"which, run `{pre}cargo tree -i {name}@{d['version']} --depth 1`{loc}, then "
+                "update that crate instead" + (" (here that's usually one of your solana / anchor crates)"
                                    if d.get("solana") else ""))
     if eco == "npm":
         return f"{where}`{cd or ''}npm install {name}@{to}`"
@@ -1434,6 +1474,9 @@ def main(argv=None):
                 d["solana"] = any(n.startswith(("solana-", "anchor-")) for n in cargo_cache[src])
                 if ship_cache[src] is not None:
                     d["ships"] = (key, d["version"]) in ship_cache[src]
+                if not d["direct"] and d.get("fix_to") is not None:
+                    d["via"] = cargo_via(folder, src, d["name"], d["version"],
+                                         cargo_cache[src], d.get("ships"))
         dep_info["cargo_checked"] = any(v is not None for v in ship_cache.values())
         dep_info["cargo_missing"] = bool(ship_cache) and not dep_info["cargo_checked"]
         dep_info["no_sources"] = bool((osv_data or {}).get("no_sources"))
