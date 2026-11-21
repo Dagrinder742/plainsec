@@ -578,7 +578,10 @@ class TestSecrets(unittest.TestCase):
         self.assertIn("Check whether it's real first", sec)
         self.assertNotIn("- Fix: Rotate it first", sec)
         self.assertIn("rotate it first", sec)          # still the advice IF real
-        self.assertIn("check: `git show 76dbbad2:'deploy_tokens.py' | sed -n 32p`", sec)
+        # git -C: works from any folder (real case: run from another repo gave
+        # "fatal: invalid object name").
+        self.assertIn(f"check: `git -C {plainsec.shell_path(self.dir)} show 76dbbad2:"
+                      "'deploy_tokens.py' | sed -n 32p`", sec)
 
     def test_specific_rule_still_says_rotate(self):
         _, out = self.run_with([leak("github-pat", "a.py", 3, "c1")])
@@ -607,7 +610,18 @@ class TestSecrets(unittest.TestCase):
     def test_files_mode_check_command(self):
         (self.dir / "cfg.py").write_text("x")
         _, out = self.run_with([leak("generic-api-key", "cfg.py", 4)])
-        self.assertIn("check: `sed -n 4p 'cfg.py'`", out)
+        self.assertIn(f"check: `sed -n 4p {plainsec.shell_path(self.dir)}/'cfg.py'`", out)
+
+    def test_view_command_paths(self):
+        f = {"commit": "abc12345", "file": "a b.json", "line": 3}
+        home = Path.home()
+        self.assertEqual(plainsec.view_command(f, home / "repo"),
+                         "git -C ~/repo show abc12345:'a b.json' | sed -n 3p")
+        self.assertEqual(plainsec.view_command(f, home / "my repo"),
+                         "git -C \"$HOME/my repo\" show abc12345:'a b.json' | sed -n 3p")
+        self.assertEqual(plainsec.view_command(dict(f, commit=None), home / "repo"),
+                         "sed -n 3p ~/repo/'a b.json'")
+        self.assertEqual(plainsec.view_command(f), "git show abc12345:'a b.json' | sed -n 3p")
 
     def test_history_rewrite_is_not_new_secrets(self):
         # Real case (demo-repo, Nov 20): filter-repo gave every commit a new
@@ -762,9 +776,11 @@ class TestOsvScanner(unittest.TestCase):
         self.assertIn("Checked with osv-scanner", out)
         self.assertIn("### `app/program/Cargo.lock` (Rust) · 2 packages", out)
         self.assertIn("`curve25519-dalek` isn't in your Cargo.toml", out)
-        self.assertIn("run `cargo tree -i curve25519-dalek@3.2.0` in `app/program`", out)
+        # every printed command works wherever it's pasted: it cd's first
+        self.assertIn(f"run `cd {plainsec.shell_path(self.dir / 'app/program')} && "
+                      "cargo tree -i curve25519-dalek@3.2.0`, then update", out)
         self.assertIn("`pip install 'anyio>=4.10.0'`, then update its pin in "
-                      "`_archive/android/requirements.txt`", out)
+                      f"`{plainsec.display_path(self.dir / '_archive/android/requirements.txt')}`", out)
         self.assertIn("nofix 1.0.0** · CRITICAL", out)
         self.assertNotIn("UNKNOWN", out)
         self.assertIn("no fixed version yet", out)
@@ -863,8 +879,8 @@ class TestOsvScanner(unittest.TestCase):
         prog.mkdir(parents=True)
         (prog / "Cargo.toml").write_text('[dependencies]\ncurve25519-dalek = "3"\n')
         _, out = self.run_cli()
-        self.assertIn("raise `curve25519-dalek` to 4.1.3 in Cargo.toml, then run "
-                      "`cargo update -p curve25519-dalek` in `app/program`", out)
+        self.assertIn(f"raise `curve25519-dalek` to 4.1.3 in `{plainsec.display_path(prog / 'Cargo.toml')}`, "
+                      f"then run `cd {plainsec.shell_path(prog)} && cargo update -p curve25519-dalek`", out)
 
     # ---- tests-only vs ships (cargo tree -e no-dev), real output format ----
     REAL_TREE = ("borsh v0.10.4\nborsh v0.10.4 (*)\nborsh v1.8.1\ncurve25519-dalek v4.1.3\n"

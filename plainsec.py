@@ -543,21 +543,32 @@ def cargo_shipping(root, source):
     return ship
 
 
-def dep_how(d):
+def dep_how(d, root=None):
     """Ecosystem-specific upgrade advice."""
-    name, to, eco = d["name"], d.get("fix_to"), d.get("ecosystem", "PyPI")
-    where = str(Path(d.get("source", "requirements.txt")).parent)
-    where = "" if where in ("", ".") else f"in `{where}`: "
     if d.get("ships") is False:
         return ("only your tests / dev tools use this (dev-dependencies), so it isn't "
-                "built into your program. Lower priority: " + _dep_how(d))
-    return _dep_how(d)
+                "built into your program. Lower priority: " + _dep_how(d, root))
+    return _dep_how(d, root)
 
 
-def _dep_how(d):
+def _run_in(root, folder):
+    """'cd <folder> && ' so a printed command works wherever it's pasted
+    (real case: a check command run from the wrong repo failed). Without a
+    root, the old relative wording is used."""
+    if root is None:
+        return None
+    return f"cd {shell_path(Path(root) / folder)} && "
+
+
+def _dep_how(d, root=None):
     name, to, eco = d["name"], d.get("fix_to"), d.get("ecosystem", "PyPI")
-    where = str(Path(d.get("source", "requirements.txt")).parent)
-    where = "" if where in ("", ".") else f"in `{where}`: "
+    source = d.get("source", "requirements.txt")
+    folder = str(Path(source).parent)
+    cd = _run_in(root, folder)
+    where = "" if folder in ("", ".") else f"in `{folder}`: "
+    if cd is not None:
+        where = ""
+    shown_source = (display_path(Path(root) / source) if root is not None else source)
     if eco == "PyPI" and name.lower() in SELF_UPGRADE_NOTE and on_termux():
         return SELF_UPGRADE_NOTE[name.lower()]
     if eco == "PyPI" and name.lower() == "pip":
@@ -568,25 +579,27 @@ def _dep_how(d):
                 "for an update.")
     if eco == "PyPI":
         return (f"`pip install '{name}>={to}'`, then update its pin in "
-                f"`{d.get('source', 'requirements.txt')}`")
+                f"`{shown_source}`")
     if eco == "crates.io":
         target = stable_of(to)
-        folder = str(Path(d.get("source", "")).parent)
-        loc = "" if folder in ("", ".") else f" in `{folder}`"
+        loc = "" if folder in ("", ".") or cd is not None else f" in `{folder}`"
+        pre = cd or ""
+        toml = (f"`{display_path(Path(root) / folder / 'Cargo.toml')}`" if root is not None
+                else "Cargo.toml")
         if semver_compatible(d["version"], to):
-            return (f"run `cargo update -p {name}`{loc}; {to} is a compatible version, "
+            return (f"run `{pre}cargo update -p {name}`{loc}; {to} is a compatible version, "
                     "so no Cargo.toml change is needed")
         if d.get("direct"):
-            return (f"raise `{name}` to {target} in Cargo.toml, then run "
-                    f"`cargo update -p {name}`{loc} (a bigger version jump can need code changes)")
+            return (f"raise `{name}` to {target} in {toml}, then run "
+                    f"`{pre}cargo update -p {name}`{loc} (a bigger version jump can need code changes)")
         return (f"`{name}` isn't in your Cargo.toml: another crate pulls it in. To see "
-                f"which, run `cargo tree -i {name}@{d['version']}`{loc}, then update that "
+                f"which, run `{pre}cargo tree -i {name}@{d['version']}`{loc}, then update that "
                 "crate instead" + (" (here that's usually one of your solana / anchor crates)"
                                    if d.get("solana") else ""))
     if eco == "npm":
-        return f"{where}`npm install {name}@{to}`"
+        return f"{where}`{cd or ''}npm install {name}@{to}`"
     if eco == "Go":
-        return f"{where}`go get {name}@v{to}`"
+        return f"{where}`{cd or ''}go get {name}@v{to}`"
     return f"upgrade `{name}` to {to} or later"
 
 
@@ -721,11 +734,24 @@ def name_hint(match):
     return ""
 
 
-def view_command(f):
-    """Command to look at the flagged line yourself (prints it locally only)."""
+def shell_path(path):
+    """The folder as you'd type it: ~/proj, or "$HOME/my proj" when it has a
+    space (~ doesn't expand inside quotes)."""
+    where = display_path(path)
+    if " " not in where:
+        return where
+    return '"' + ("$HOME" + where[1:] if where.startswith("~") else where) + '"'
+
+
+def view_command(f, root=None):
+    """Command to look at the flagged line yourself (prints it locally only).
+    With root, it works from any folder: `git -C` names the repo. Real case:
+    the user ran the check from another repo and got "invalid object name"."""
     if f["commit"]:
-        return f"git show {f['commit']}:'{f['file']}' | sed -n {f['line']}p"
-    return f"sed -n {f['line']}p '{f['file']}'"
+        repo = f"-C {shell_path(root)} " if root is not None else ""
+        return f"git {repo}show {f['commit']}:'{f['file']}' | sed -n {f['line']}p"
+    prefix = shell_path(root) + "/" if root is not None else ""
+    return f"sed -n {f['line']}p {prefix}'{f['file']}'"
 
 
 def secret_meaning(rule, description):
@@ -1138,12 +1164,8 @@ def build_report(name, code, deps, errors, show_all=False, skipped=None, unused=
         head += " · " + changes_headline(changes)
     out = [f"# Security report: {name}", "", f"**{head}**", ""]
     if root is not None:
-        where = display_path(root)
-        cd = where
-        if " " in where:   # quoted, with $HOME because ~ doesn't expand inside quotes
-            cd = '"' + ("$HOME" + where[1:] if where.startswith("~") else where) + '"'
-        out += [f"File paths below start from `{where}`. To open one or run a "
-                f"`check:` command, first run `cd {cd}`.", ""]
+        out += [f"File paths below start from `{display_path(root)}`. To open one, "
+                f"first run `cd {shell_path(root)}`.", ""]
     for e in errors:
         out.append(f"> ⚠ Not checked: {e}")
     if errors:
@@ -1151,9 +1173,9 @@ def build_report(name, code, deps, errors, show_all=False, skipped=None, unused=
     if changes:
         out += render_changes(changes, hidden_ids, skipped_ids)
     if secrets is not None:
-        out += render_secrets(secrets, secrets_info or {})
+        out += render_secrets(secrets, secrets_info or {}, root)
 
-    out += render_deps(deps, deps_failed, dep_info or {})
+    out += render_deps(deps, deps_failed, dep_info or {}, root)
 
     if code_failed:
         out += ["## 2. Your code",
@@ -1206,7 +1228,7 @@ def build_report(name, code, deps, errors, show_all=False, skipped=None, unused=
     return "\n".join(out)
 
 
-def render_secrets(secrets, info):
+def render_secrets(secrets, info, root=None):
     out = ["## 0. Possible secrets (check these first)"]
     if secrets == "not-checked":
         return out + ["NOT CHECKED (see warning above). This is not an all-clear.", ""]
@@ -1239,11 +1261,11 @@ def render_secrets(secrets, info):
                 bits.append(f["hint"])
             out.append("  - " + " — ".join(bits))
             if f.get("generic"):
-                out.append(f"    - check: `{view_command(f)}`")
+                out.append(f"    - check: `{view_command(f, root)}`")
     return out + [""]
 
 
-def render_deps(deps, failed, info):
+def render_deps(deps, failed, info, root=None):
     out = ["## 1. Dependencies"]
     if failed:
         return out + ["NOT CHECKED (see warning above). This is not an all-clear.", ""]
@@ -1293,7 +1315,7 @@ def render_deps(deps, failed, info):
             if d.get("fix_to"):
                 out.append(f"  - Fixed in: {fix_text(d['fix_to'])}"
                            + (f" (no fix yet for {', '.join(d['no_fix'])})" if d.get("no_fix") else ""))
-            out.append(f"  - How: {dep_how(d)}")
+            out.append(f"  - How: {dep_how(d, root)}")
     notices = info.get("notices") or []
     unsound = [n for n in notices if n.get("kind") != "unmaintained"]
     unmaint = [n for n in notices if n.get("kind") == "unmaintained"]
@@ -1310,7 +1332,7 @@ def render_deps(deps, failed, info):
                        f"{d['summary'] or d['ids'][0]}")
             if d.get("fix_to"):
                 out.append(f"  - Fixed in: {fix_text(d['fix_to'])}")
-            out.append(f"  - How: {dep_how(d)}")
+            out.append(f"  - How: {dep_how(d, root)}")
     if unmaint:
         out.append(f"### Unmaintained ({len(unmaint)}): not vulnerabilities")
         out.append("Nobody maintains these any more, so future security problems won't "
