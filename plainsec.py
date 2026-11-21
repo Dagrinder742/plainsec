@@ -250,6 +250,18 @@ def scan_deps_osv(folder):
         if not ours:
             return {"results": [], "no_sources": True}, None
         usable = [f for f in ours if lockfile_ok(f)]
+        rest = [f for f in ours if not lockfile_ok(f)]
+        if not usable and all(Path(f).name == "pyproject.toml" for f in rest):
+            declared = {f: pyproject_dependencies(Path(folder) / f) for f in rest}
+            if all(d == [] for d in declared.values()):
+                # e.g. a package with no dependencies: really nothing to check
+                return {"results": [], "no_sources": True,
+                        "no_deps_declared": rest}, None
+            with_deps = [f for f, d in declared.items() if d != []]
+            return None, (", ".join(with_deps) + " lists dependencies but there's no lock "
+                          "file, and osv-scanner checks lock files (exact versions). Make one "
+                          "(`uv lock`, `poetry lock`, or `pip freeze > requirements.txt` inside "
+                          "the project's venv) and run plainsec again.")
         if usable:
             # Route that worked on Termux: hand osv-scanner each file with -L.
             cmd = ["osv-scanner", "scan", "source", "--format", "json"]
@@ -294,6 +306,23 @@ LOCKFILE_NAMES = {"Cargo.lock", "package-lock.json", "yarn.lock", "pnpm-lock.yam
 def lockfile_ok(rel):
     name = Path(rel).name
     return name in LOCKFILE_NAMES or (name.startswith("requirements") and name.endswith(".txt"))
+
+
+def pyproject_dependencies(path):
+    """Declared runtime dependencies in a pyproject.toml ([project] and Poetry).
+    None if it can't be read (treated as 'has dependencies' to stay safe)."""
+    try:
+        import tomllib
+    except ImportError:
+        return None
+    try:
+        data = tomllib.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    deps = list((data.get("project") or {}).get("dependencies") or [])
+    poetry = ((data.get("tool") or {}).get("poetry") or {}).get("dependencies") or {}
+    deps += [k for k in poetry if k.lower() != "python"]
+    return deps
 
 
 def find_dep_files(folder, limit=20):
@@ -831,7 +860,8 @@ def state_path(folder):
         os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"),
         "plainsec")
     resolved = str(Path(folder).resolve())
-    tag = hashlib.sha1(resolved.encode("utf-8")).hexdigest()[:10]
+    # Only names a file, not security; saying so keeps bandit (B324) quiet honestly.
+    tag = hashlib.sha1(resolved.encode("utf-8"), usedforsecurity=False).hexdigest()[:10]
     return Path(base) / f"{Path(resolved).name or 'root'}-{tag}.json"
 
 
@@ -1186,6 +1216,9 @@ def render_deps(deps, failed, info):
                        + ", ".join(f"`{f}`" for f in info["not_checked_files"]))
     elif info.get("tool") == "osv-scanner":
         out.append("Checked with osv-scanner: every dependency file in the project.")
+        if info.get("no_deps_declared"):
+            return out + [", ".join(f"`{f}`" for f in info["no_deps_declared"])
+                          + " declares no dependencies, so there was nothing to check.", ""]
         if info.get("no_sources"):
             return out + ["No dependency files found, so there was nothing to check.", ""]
     else:
@@ -1342,6 +1375,7 @@ def main(argv=None):
         dep_info["cargo_missing"] = bool(ship_cache) and not dep_info["cargo_checked"]
         dep_info["no_sources"] = bool((osv_data or {}).get("no_sources"))
         dep_info["file_by_file"] = (osv_data or {}).get("file_by_file")
+        dep_info["no_deps_declared"] = (osv_data or {}).get("no_deps_declared")
         dep_info["not_checked_files"] = (osv_data or {}).get("not_checked_files")
     else:
         deps = parse_audit(audit_data)

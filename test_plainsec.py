@@ -920,6 +920,35 @@ class TestOsvScanner(unittest.TestCase):
         self.assertEqual(calls[1][-2:], ["-L", str(self.dir / "prog" / "Cargo.lock")])
         self.assertNotIn("node_modules", " ".join(calls[1]))
 
+    def test_pyproject_without_dependencies_is_nothing_to_check(self):
+        # Real case: plainsec's own repo (pyproject.toml, no dependencies) showed
+        # "dependencies NOT CHECKED" after the Termux safeguard.
+        (self.dir / "pyproject.toml").write_text(
+            '[project]\nname = "x"\ndependencies = []\n'
+            '[project.optional-dependencies]\nscanners = ["bandit"]\n')
+        with mock.patch.object(plainsec.subprocess, "run",
+                               return_value=mock.Mock(returncode=128, stdout="", stderr="")):
+            data, err = plainsec.scan_deps_osv(self.dir)
+        self.assertIsNone(err)
+        self.assertEqual(data["no_deps_declared"], ["pyproject.toml"])
+        (self.dir / "o.json").write_text(json.dumps(data))
+        _, out = self.run_cli()
+        self.assertIn("`pyproject.toml` declares no dependencies, so there was nothing to check.", out)
+        self.assertNotIn("NOT CHECKED", out.split("## 1.")[1].split("## 2.")[0])
+
+    def test_pyproject_with_dependencies_but_no_lock_is_not_checked(self):
+        (self.dir / "pyproject.toml").write_text('[project]\nname = "x"\ndependencies = ["requests>=2"]\n')
+        with mock.patch.object(plainsec.subprocess, "run",
+                               return_value=mock.Mock(returncode=128, stdout="", stderr="")):
+            data, err = plainsec.scan_deps_osv(self.dir)
+        self.assertIsNone(data)
+        self.assertIn("pyproject.toml lists dependencies but there's no lock file", err)
+
+    def test_poetry_dependencies_counted(self):
+        f = self.dir / "pyproject.toml"
+        f.write_text('[tool.poetry.dependencies]\npython = "^3.11"\nrequests = "^2"\n')
+        self.assertEqual(plainsec.pyproject_dependencies(f), ["requests"])
+
     def test_osv_none_found_and_fallback_fails_is_not_checked(self):
         (self.dir / "requirements.txt").write_text("x")
         with mock.patch.object(plainsec.subprocess, "run",
