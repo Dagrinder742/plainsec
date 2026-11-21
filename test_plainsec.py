@@ -375,6 +375,19 @@ class TestSinceLastScan(unittest.TestCase):
         self.assertIn("0 new, 0 gone since last scan", second)
         self.assertIn("Nothing changed in what was checked.", second)
 
+    def test_report_says_where_paths_start(self):
+        # Real case: report said `anvil/Matrixenc.py` line 24; the user ran
+        # `nano anvil/Matrixenc.py` from ~ and got an empty new file.
+        out = self.scan([bfind("B105", "anvil/x.py", 24, "pw = 'x'")])
+        self.assertIn(f"File paths below start from `{plainsec.display_path(self.dir)}`", out)
+        self.assertIn(f"first run `cd ", out)
+
+    def test_display_path(self):
+        home = Path.home()
+        self.assertEqual(plainsec.display_path(home / "proj"), "~/proj")
+        self.assertEqual(plainsec.display_path(home), "~")
+        self.assertEqual(plainsec.display_path("/opt/x"), "/opt/x")
+
     def test_no_save_does_not_claim_baseline_saved(self):
         # Real case: the Action runs with --no-save, yet its report said
         # "first scan (baseline saved)".

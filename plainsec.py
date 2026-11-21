@@ -1095,10 +1095,20 @@ def headline(shown, hidden, deps, skipped=None, deps_checked=True, secrets=None,
     return " · ".join(parts)
 
 
+def display_path(path):
+    """~/project instead of /home/me/project, so it's short and copyable."""
+    path = Path(path).resolve()
+    try:
+        return "~/" + path.relative_to(Path.home()).as_posix() if path != Path.home() else "~"
+    except ValueError:
+        return path.as_posix()
+
+
 def build_report(name, code, deps, errors, show_all=False, skipped=None, unused=None,
                  changes=None, hidden_ids=frozenset(), skipped_ids=frozenset(),
-                 secrets=None, secrets_info=None, dep_info=None):
-    """secrets: None = not part of this report; "not-checked"; or a list."""
+                 secrets=None, secrets_info=None, dep_info=None, root=None):
+    """secrets: None = not part of this report; "not-checked"; or a list.
+    root: the scanned folder; when given, the report says paths start there."""
     deps_failed = any(e.startswith("dependency scan") for e in errors)
     code_failed = any(e.startswith("code scan") for e in errors)
     shown, hidden = split_findings(code, show_all)
@@ -1111,6 +1121,13 @@ def build_report(name, code, deps, errors, show_all=False, skipped=None, unused=
     if changes:
         head += " · " + changes_headline(changes)
     out = [f"# Security report: {name}", "", f"**{head}**", ""]
+    if root is not None:
+        where = display_path(root)
+        cd = where
+        if " " in where:   # quoted, with $HOME because ~ doesn't expand inside quotes
+            cd = '"' + ("$HOME" + where[1:] if where.startswith("~") else where) + '"'
+        out += [f"File paths below start from `{where}`. To open one or run a "
+                f"`check:` command, first run `cd {cd}`.", ""]
     for e in errors:
         out.append(f"> ⚠ Not checked: {e}")
     if errors:
@@ -1423,7 +1440,8 @@ def main(argv=None):
                           changes=changes, hidden_ids=hidden_ids,
                           skipped_ids=skipped_ids,
                           secrets=secrets if secrets_ok else "not-checked",
-                          secrets_info=secrets_data or {}, dep_info=dep_info)
+                          secrets_info=secrets_data or {}, dep_info=dep_info,
+                          root=folder)
     print(report)
 
     if args.out:
