@@ -375,6 +375,16 @@ class TestSinceLastScan(unittest.TestCase):
         self.assertIn("0 new, 0 gone since last scan", second)
         self.assertIn("Nothing changed in what was checked.", second)
 
+    def test_no_save_does_not_claim_baseline_saved(self):
+        # Real case: the Action runs with --no-save, yet its report said
+        # "first scan (baseline saved)".
+        r = [bfind("B602", "a.py", 5, "run(cmd, shell=True)", "HIGH")]
+        out = self.scan(r, extra=("--no-save",))
+        self.assertNotIn("baseline saved", out)
+        self.assertNotIn("Saved as the starting point", out)
+        self.assertIn("first scan (not saved: --no-save)", out)
+        self.assertIn("first scan (baseline saved)", self.scan(r))   # really nothing was saved
+
     def test_moved_line_is_not_new_or_gone(self):
         self.scan([bfind("B602", "a.py", 5, "run(cmd, shell=True)", "HIGH")])
         out = self.scan([bfind("B602", "a.py", 40, "run(cmd, shell=True)", "HIGH")])

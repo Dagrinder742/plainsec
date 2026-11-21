@@ -967,6 +967,9 @@ def compare(old, code, deps, code_ok, deps_ok, secrets=None, secrets_ok=False):
 def render_changes(ch, hidden_ids, skipped_ids):
     out = ["## Since last scan"]
     if ch["first"]:
+        if not ch.get("saved", True):
+            return out + ["No earlier scan of this folder to compare with, and this "
+                          "run used --no-save, so nothing was saved for next time.", ""]
         return out + ["First scan of this folder. Saved as the starting point; "
                       "the next scan will show what changed.", ""]
     out.append(f"Compared with the scan from {ch['since'].replace('T', ' ')}.")
@@ -1014,7 +1017,8 @@ def render_changes(ch, hidden_ids, skipped_ids):
 
 def changes_headline(ch):
     if ch["first"]:
-        return "first scan (baseline saved)"
+        return ("first scan (baseline saved)" if ch.get("saved", True)
+                else "first scan (not saved: --no-save)")
     n = len(ch["new"]) + len(ch["new_deps"]) + len(ch["new_secrets"])
     g = len(ch["fixed"]) + len(ch["fixed_deps"]) + len(ch["gone_secrets"])
     if not (ch["code_compared"] or ch["deps_compared"] or ch["secrets_compared"]):
@@ -1396,6 +1400,7 @@ def main(argv=None):
     # "maintenance notice" is never reported as new or gone.
     deps_history = deps + dep_info.get("notices", [])
     changes = compare(old, code, deps_history, code_ok, deps_ok, secrets, secrets_ok)
+    changes["saved"] = not args.no_save
     if not args.no_save:
         save_state(spath, snapshot(code, deps_history, code_ok, deps_ok, secrets, secrets_ok), old)
 

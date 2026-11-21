@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "plainsec"
-version = "0.1.2"
+version = "0.1.3"
 description = "Plain-English security reports for code projects: explains what bandit, gitleaks, osv-scanner and pip-audit found, and what to do about it."
 readme = "README.md"
 license = { text = "MIT" }
