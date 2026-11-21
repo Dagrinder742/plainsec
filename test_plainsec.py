@@ -382,6 +382,23 @@ class TestSinceLastScan(unittest.TestCase):
         self.assertIn(f"File paths below start from `{plainsec.display_path(self.dir)}`", out)
         self.assertIn(f"first run `cd ", out)
 
+    def test_empty_password_value_is_tagged(self):
+        # Real case: trinity_master anvil/Matrixenc.py line 24, B105 on
+        # ACTIVE_LISTENER = {"status": False, "port": None, "password": None}
+        f = lambda tid, text: {"id": tid, "text": text}
+        yes = ['ACTIVE_LISTENER = {"status": False, "port": None, "password": None}',
+               'token = ""', "api_key=None,", "PASSWORD = ''  # set later"]
+        no = ['password = "hunter2"', 'DB_PASS = os.environ["X"]',
+              'password = None_or_default()']
+        for t in yes:
+            self.assertTrue(plainsec.empty_password_value(f("B105", t)), t)
+        for t in no:
+            self.assertFalse(plainsec.empty_password_value(f("B105", t)), t)
+        self.assertFalse(plainsec.empty_password_value(f("B101", yes[0])))
+        out = self.scan([bfind("B105", "anvil/m.py", 24, yes[0]),
+                         bfind("B105", "anvil/m.py", 30, 'pw = "hunter2"')])
+        self.assertIn("lines 24 (empty value, likely not a secret), 30", out)
+
     def test_display_path(self):
         home = Path.home()
         self.assertEqual(plainsec.display_path(home / "proj"), "~/proj")

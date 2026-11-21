@@ -1050,15 +1050,31 @@ def group_by_check(findings):
                         -len(kv[1]), kv[0])))
 
 
+PASSWORD_CHECKS = {"B105", "B106", "B107"}
+# A password-like name whose value is None / "" / '' / False: an empty slot,
+# not a secret. Real case: `{"status": False, "port": None, "password": None}`.
+_EMPTY_VALUE = re.compile(
+    r"""(?i)(pass|pwd|secret|token|key)\w*['"]?\s*[:=]\s*(None|False|""|'')\s*([,})\]#]|$)""")
+
+
+def empty_password_value(finding):
+    return (finding["id"] in PASSWORD_CHECKS
+            and bool(_EMPTY_VALUE.search(finding.get("text") or "")))
+
+
 def where_lines(findings):
     """One line per file: 'path — lines 3, 9, 12 (+4 more)'."""
-    per_file = {}
+    per_file, empty = {}, set()
     for f in findings:
         per_file.setdefault(f["file"], []).append(f["line"])
+        if empty_password_value(f):
+            empty.add((f["file"], f["line"]))
     out = []
     for path, lines in sorted(per_file.items(), key=lambda kv: (-len(kv[1]), kv[0])):
         lines = sorted(set(lines))
-        shown = ", ".join(str(n) for n in lines[:MAX_LINES_SHOWN])
+        shown = ", ".join(str(n) + (" (empty value, likely not a secret)"
+                                    if (path, n) in empty else "")
+                          for n in lines[:MAX_LINES_SHOWN])
         extra = len(lines) - MAX_LINES_SHOWN
         label = "line" if len(lines) == 1 else "lines"
         tag = " — test file, often harmless there" if is_test_file(path) else ""
