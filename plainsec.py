@@ -161,8 +161,12 @@ def run_tool(cmd):
 
 
 def scan_code(folder):
+    # bandit's -x matches by substring of the path, so build/dist are written
+    # with slashes (plain "build" would also skip a file like rebuild.py).
+    # build/ is where `pip install .` copies your code; scanning it doubled
+    # every finding in plainsec's own Action run.
     cmd = ["bandit", "-r", str(folder), "-f", "json", "-q",
-           "-x", ".venv,venv,.git,node_modules"]
+           "-x", ".venv,venv,.git,node_modules,/build/,/dist/,.egg-info"]
     cfg = Path(folder) / "bandit.yaml"
     if cfg.exists():
         cmd += ["-c", str(cfg)]

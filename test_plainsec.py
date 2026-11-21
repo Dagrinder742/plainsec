@@ -898,6 +898,16 @@ class TestOsvScanner(unittest.TestCase):
             if code == 128:
                 self.assertTrue(data["no_sources"])
 
+    def test_bandit_skips_build_copies(self):
+        # Real case: the Action ran `pip install .` first, which copied
+        # plainsec.py into build/lib/, and every finding showed up twice.
+        with mock.patch.object(plainsec, "run_tool", return_value=({}, None)) as rt:
+            plainsec.scan_code(self.dir)
+        excluded = rt.call_args[0][0][rt.call_args[0][0].index("-x") + 1].split(",")
+        for part in ("/build/", "/dist/", ".egg-info", ".venv", "node_modules"):
+            self.assertIn(part, excluded)
+        self.assertNotIn("build", excluded)   # would also match rebuild.py
+
     def test_osv_none_found_falls_back_to_file_by_file(self):
         # Real case (Termux, osv-scanner 2.4.0): folder scan exit 128, but
         # `-L <Cargo.lock>` worked (exit 1, 682 packages).
