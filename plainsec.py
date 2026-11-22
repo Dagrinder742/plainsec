@@ -761,10 +761,26 @@ def fixed_command(text):
 COMMAND_CHECKS = {"B602", "B605", "B607"}
 
 
+# A value with 7+ words is a sentence (a message, help text), not a key.
+# Passphrases can have spaces, so short multi-word values are NOT tagged.
+# Real case: plainsec's own SECRET_FIX_HISTORY = ("Rotate it first: make a new
+# key and revoke …") was flagged B105 "password hard-coded".
+_SENTENCE_VALUE = re.compile(r"""[:=]\s*\(?\s*[rbfu]*(["'])((?:(?!\1).){0,400})""")
+
+
+def sentence_value(finding):
+    if finding["id"] not in PASSWORD_CHECKS:
+        return False
+    m = _SENTENCE_VALUE.search(finding.get("text") or "")
+    return bool(m) and len(m.group(2).split()) >= 7
+
+
 def line_note(f):
     """Short note after a line number, from the flagged line only."""
     if empty_password_value(f):
         return "empty value, likely not a secret"
+    if sentence_value(f):
+        return "the value is a sentence, not a key: likely a false alarm"
     if f["id"] in COMMAND_CHECKS:
         kind = fixed_command(f.get("text"))
         if kind == "empty":

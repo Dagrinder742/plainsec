@@ -1264,6 +1264,23 @@ class TestTermuxWording(unittest.TestCase):
                           ("contest_entry", False)]:
             self.assertEqual(plainsec.is_selftest_name(name), yes, name)
 
+    def test_sentence_values_are_noted(self):
+        # Real case: plainsec.py's own SECRET_FIX_* help texts (lines 898-904).
+        f = lambda text, tid="B105": {"id": tid, "text": text}
+        yes = ['SECRET_FIX_HISTORY = ("Rotate it first: make a new key and revoke the old one. Deleting "',
+               "TOKEN_HELP = 'Paste your token here and press enter to continue now'"]
+        no = ['password = "hunter2"',
+              'passphrase = "correct horse battery staple"',      # passphrases can have spaces
+              'SECRET_FIX = ("',                                     # value on the next line: unknown
+              'pw = os.environ["A B C D E F G H"]']                  # not a literal assignment value
+        for t in yes:
+            self.assertTrue(plainsec.sentence_value(f(t)), t)
+        for t in no:
+            self.assertFalse(plainsec.sentence_value(f(t)), t)
+        self.assertFalse(plainsec.sentence_value(f(yes[0], "B101")))
+        self.assertEqual(plainsec.line_note(dict(f(yes[0]), severity="LOW")),
+                         "the value is a sentence, not a key: likely a false alarm")
+
     def test_fixed_commands_are_noted(self):
         # Real cases: trinity_master matrix_rain.py:23 (HIGH B605) and
         # OXX-Terminal cv.py:153 os.system("").
