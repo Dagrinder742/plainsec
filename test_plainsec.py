@@ -434,6 +434,7 @@ class TestSinceLastScan(unittest.TestCase):
         out = self.scan([bfind("B605", "anvil/matrix_rain.py", 23, line, "HIGH")])
         self.assertIn("0 new, 0 gone, 1 moved since last scan", out)
         self.assertIn("B605 `anvil/matrix_rain.py` line 23 (was `anvil/Matrix_Rain.py`)", out)
+        self.assertIn("**Moved or renamed (1):** the same finding in a renamed", out)
         self.assertNotIn("**New", out)
         # a different file name is NOT paired: that's a real new + gone
         out = self.scan([bfind("B605", "anvil/other.py", 23, line, "HIGH")])
@@ -1017,12 +1018,42 @@ class TestOsvScanner(unittest.TestCase):
              mock.patch.object(plainsec.subprocess, "run", side_effect=self.fake_cargo(tree)):
             _, out = self.run_cli()
         self.assertIn("3 risky dependencies (2 high/critical, 1 test-only)", out)
-        self.assertIn("curve25519-dalek 3.2.0** · HIGH · tests only", out)
+        # test-only crates share ONE explanation (real case: 7 crates each repeated it)
+        self.assertIn("#### Used only by tests / dev tools (1): lower priority\n"
+                      "These come in only through dev-dependencies", out)
+        self.assertIn("curve25519-dalek 3.2.0** · HIGH · 2 issues", out)
         self.assertIn("nofix 1.0.0** · CRITICAL · ships in your program", out)
-        self.assertIn("only your tests / dev tools use this", out)
+        self.assertNotIn("only your tests / dev tools use this", out)
+        self.assertIn("What it means (2 different issues):\n    - GHSA-aaaa: Other bug.\n"
+                      "    - GHSA-x4gp: Timing variability.", out)
+        self.assertIn("archive-looking folder (`_archive/`)", out)
         self.assertIn("Rust crates were checked with `cargo tree`", out)
         sec = out.split("Cargo.lock` (Rust)")[1]
         self.assertLess(sec.index("nofix"), sec.index("curve25519-dalek"))   # ships first
+
+    def test_issue_summary_skips_package_descriptions(self):
+        # Real case: idna's "What it means" was the package's own description.
+        intro = ("Internationalized Domain Names in Applications (IDNA) for Python provides "
+                 "support for Internationalized Domain Names in Applications (IDNA) and Unicode "
+                 "IDNA Compatibility Processing.")
+        self.assertEqual(plainsec.issue_summary([{"details": intro}]), "")
+        self.assertEqual(plainsec.issue_summary([{"details": intro + " Specially crafted "
+                         "inputs could cause excessive CPU use. More text."}]),
+                         "Specially crafted inputs could cause excessive CPU use.")
+        self.assertEqual(plainsec.issue_summary([{"summary": "Short one", "details": intro}]),
+                         "Short one")
+        d = {"ids": ["CVE-2026-45409"], "summary": "",
+             "issues": [("CVE-2026-45409", "", "PYSEC-2026-1")]}
+        self.assertEqual(plainsec.what_it_means(d),
+                         ["  - What it means: No short description was published; details: "
+                          "https://osv.dev/vulnerability/PYSEC-2026-1"])
+
+    def test_archive_hint_only_for_archive_folders(self):
+        self.assertIn("`_archive/`", plainsec.archive_hint("_archive/subdirs/android/requirements.txt"))
+        self.assertIn("`app/old/`", plainsec.archive_hint("app/old/requirements.txt"))
+        for src in ("requirements.txt", "archiver/requirements.txt", "soldier_fund/program/Cargo.lock",
+                    "old_stuff.txt"):
+            self.assertEqual(plainsec.archive_hint(src), "", src)
 
     def test_report_without_cargo_says_how(self):
         with mock.patch.object(plainsec.shutil, "which", return_value=None):

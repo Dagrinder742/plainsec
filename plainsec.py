@@ -461,8 +461,8 @@ def parse_osv(data, root=None):
                     "label": _label(g.get("ids", []), g.get("aliases", [])),
                     "severity": sev_label(g.get("max_severity")),
                     "fix": _first_fix(vs, name, version),
-                    "summary": next((first_sentence(v.get("summary") or v.get("details") or "")
-                                     for v in vs if v.get("summary") or v.get("details")), ""),
+                    "summary": issue_summary(vs),
+                    "osv_id": (g.get("ids") or ["?"])[0],
                 }
                 kind = next((k for k in map(_informational_kind, vs) if k), "")
                 entry["kind"] = kind
@@ -475,10 +475,12 @@ def parse_osv(data, root=None):
                     ids=[e["label"] for e in real],
                     severity=real[0]["severity"],
                     summary=real[0]["summary"],
+                    issues=[(e["label"], e["summary"], e["osv_id"]) for e in real],
                     fix_to=max(fixes, key=vkey) if fixes else None,
                     no_fix=[e["label"] for e in real if not e["fix"]]))
             for e in info:
                 notices.append(dict(base, ids=[e["label"]], summary=e["summary"],
+                                    issues=[(e["label"], e["summary"], e["osv_id"])],
                                     kind=e["kind"], fix_to=e["fix"], no_fix=[]))
     risky.sort(key=lambda d: (d["source"], DEP_SEV_ORDER.get(d["severity"], 9), d["name"]))
     return risky, notices
@@ -601,9 +603,10 @@ def cargo_via(root, source, name, version, direct, ships=None):
     return sorted(found)
 
 
-def dep_how(d, root=None):
-    """Ecosystem-specific upgrade advice."""
-    if d.get("ships") is False:
+def dep_how(d, root=None, grouped=False):
+    """Ecosystem-specific upgrade advice. grouped=True: the test-only
+    explanation is already given once for the group, so don't repeat it."""
+    if d.get("ships") is False and not grouped:
         return ("only your tests / dev tools use this (dev-dependencies), so it isn't "
                 "built into your program. Lower priority: " + _dep_how(d, root))
     return _dep_how(d, root)
@@ -830,6 +833,34 @@ def parse_audit(data):
             "severity": "", "no_fix": [],
         })
     return risky
+
+
+_PROBLEM_WORDS = re.compile(
+    r"vulnerab|attack|exploit|crash|denial|dos\b|inject|bypass|overflow|leak|spoof|"
+    r"forg|unsound|panic|hang|exhaust|untrusted|malicious|unsafe|disclos|expos|"
+    r"allow|could|can be|may |fail|improper|incorrect|insufficient|missing|race|"
+    r"redirect|traversal|smuggl|tamper|compromis|distrust|timing", re.I)
+
+
+def issue_summary(vs):
+    """Short 'what it means' for one problem. Real case: idna had no summary,
+    and the first sentence of its details just described the package
+    ("…provides support for Internationalized Domain Names…"). A details
+    sentence is used only if it sounds like a problem; else "" (the report
+    then links the advisory)."""
+    for v in vs:
+        if v.get("summary"):
+            return first_sentence(v["summary"])
+    for v in vs:
+        text = " ".join((v.get("details") or "").split())
+        for sentence in re.split(r"(?<=[.!?])\s+", text)[:3]:
+            if _PROBLEM_WORDS.search(sentence):
+                return first_sentence(sentence)
+    return ""
+
+
+def advisory_link(osv_id):
+    return f"https://osv.dev/vulnerability/{osv_id}"
 
 
 def first_sentence(text, limit=240):
@@ -1214,7 +1245,9 @@ def render_changes(ch, hidden_ids, skipped_ids):
                   for d in ch["new_deps"]]
         out += capped(lines)
     if ch.get("moved"):
-        out.append(f"**Moved or renamed ({len(ch['moved'])}):** same findings in a renamed "
+        one = len(ch["moved"]) == 1
+        out.append(f"**Moved or renamed ({len(ch['moved'])}):** "
+                   f"{'the same finding' if one else 'same findings'} in a renamed "
                    "or moved file, so not counted as new or gone.")
         out += capped([f"  - {f['id']} `{f['file']}` line {f['line']} (was `{was}`)"
                        for f, was in ch["moved"]])
@@ -1518,6 +1551,51 @@ def render_secrets(secrets, info, root=None):
     return out + [""]
 
 
+def what_it_means(d):
+    """One line, or one line per issue when they're about different things.
+    Real cases: anyio had 2 issues and only the first was explained; idna's
+    only text was the package's own description."""
+    issues = d.get("issues") or [(d["ids"][0] if d.get("ids") else "?", d.get("summary", ""), None)]
+    distinct = []
+    for label, summary, osv_id in issues:
+        if summary not in [x[1] for x in distinct]:
+            distinct.append((label, summary, osv_id))
+    def text(summary, osv_id):
+        return summary or ("No short description was published"
+                           + (f"; details: {advisory_link(osv_id)}" if osv_id else ""))
+    if len(distinct) == 1:
+        label, summary, osv_id = distinct[0]
+        return [f"  - What it means: {text(summary, osv_id)}"]
+    out = [f"  - What it means ({len(distinct)} different issues):"]
+    for label, summary, osv_id in distinct[:4]:
+        out.append(f"    - {label}: {text(summary, osv_id)}")
+    if len(distinct) > 4:
+        out.append(f"    - …and {len(distinct) - 4} more")
+    return out
+
+
+_ARCHIVE_DIR = re.compile(r"^_?(archive[sd]?|old|backups?|deprecated|legacy|attic)$", re.I)
+
+
+def archive_hint(src):
+    """Real case: trinity_master's _archive/subdirs/android/requirements.txt
+    got upgrade advice for code that's no longer used."""
+    parts = Path(src).parts[:-1]
+    for i, part in enumerate(parts):
+        if _ARCHIVE_DIR.match(part):
+            folder = "/".join(parts[:i + 1]) + "/"
+            return (f"This file is in an archive-looking folder (`{folder}`). If you don't "
+                    f"use that code any more, add the line `{folder}` to a `.plainsec` file "
+                    "in the project to skip it.")
+    return ""
+
+
+def test_only_heading(n):
+    return [f"#### Used only by tests / dev tools ({n}): lower priority",
+            "These come in only through dev-dependencies, so they aren't built into "
+            "your program."]
+
+
 def render_deps(deps, failed, info, root=None):
     out = ["## 1. Dependencies"]
     if failed:
@@ -1552,23 +1630,35 @@ def render_deps(deps, failed, info, root=None):
     by_src = {}
     for d in deps:
         by_src.setdefault(d.get("source", "requirements.txt"), []).append(d)
+    def one_package(d, grouped):
+        sev = (" · no severity score" if d.get("severity") == "NO SCORE"
+               else f" · {d['severity']}" if d.get("severity") else "")
+        if not grouped:
+            sev += " · ships in your program" if d.get("ships") else ""
+        n = len(d["ids"])
+        lines = [f"- **{d['name']} {d['version']}**{sev} · {n} issue{'s' if n != 1 else ''} "
+                 f"({', '.join(d['ids'][:4])}{', …' if n > 4 else ''})"]
+        lines += what_it_means(d)
+        if d.get("fix_to"):
+            lines.append(f"  - Fixed in: {fix_text(d['fix_to'])}"
+                         + (f" (no fix yet for {', '.join(d['no_fix'])})" if d.get("no_fix") else ""))
+        lines.append(f"  - How: {dep_how(d, root, grouped)}")
+        return lines
+
     for src, items in by_src.items():
         eco = ECOSYSTEM_NAME.get(items[0].get("ecosystem"), items[0].get("ecosystem", ""))
         out.append(f"### `{src}` ({eco}) · {len(items)} package{'s' if len(items) != 1 else ''}")
-        for d in ship_order(items):
-            sev = (" · no severity score" if d.get("severity") == "NO SCORE"
-                   else f" · {d['severity']}" if d.get("severity") else "")
-            sev += (" · tests only" if d.get("ships") is False else
-                    " · ships in your program" if d.get("ships") else "")
-            n = len(d["ids"])
-            out.append(f"- **{d['name']} {d['version']}**{sev} · {n} issue{'s' if n != 1 else ''} "
-                       f"({', '.join(d['ids'][:4])}{', …' if n > 4 else ''})")
-            if d["summary"]:
-                out.append(f"  - What it means: {d['summary']}")
-            if d.get("fix_to"):
-                out.append(f"  - Fixed in: {fix_text(d['fix_to'])}"
-                           + (f" (no fix yet for {', '.join(d['no_fix'])})" if d.get("no_fix") else ""))
-            out.append(f"  - How: {dep_how(d, root)}")
+        hint = archive_hint(src)
+        if hint:
+            out.append(hint)
+        ships = [d for d in items if d.get("ships") is not False]
+        tests = [d for d in items if d.get("ships") is False]
+        for d in ships:
+            out += one_package(d, False)
+        if tests:
+            out += test_only_heading(len(tests))
+            for d in tests:
+                out += one_package(d, True)
     notices = info.get("notices") or []
     unsound = [n for n in notices if n.get("kind") != "unmaintained"]
     unmaint = [n for n in notices if n.get("kind") == "unmaintained"]
@@ -1577,15 +1667,24 @@ def render_deps(deps, failed, info, root=None):
         out.append("\"Unsound\" means the code can break Rust's memory-safety guarantees "
                    "if it's used in certain ways. No real attack is known, so it isn't "
                    "scored as a vulnerability, but it's worth fixing when a fix exists.")
-        for d in ship_order(unsound):
+        def one_notice(d, grouped):
             kind = "" if d.get("kind") in ("unsound", "") else f" [{d['kind']}]"
-            kind += (" · tests only" if d.get("ships") is False else
-                     " · ships in your program" if d.get("ships") else "")
-            out.append(f"- **{d['name']} {d['version']}**{kind} (`{d['source']}`): "
-                       f"{d['summary'] or d['ids'][0]}")
+            if not grouped:
+                kind += " · ships in your program" if d.get("ships") else ""
+            lines = [f"- **{d['name']} {d['version']}**{kind} (`{d['source']}`): "
+                     f"{d['summary'] or d['ids'][0]}"]
             if d.get("fix_to"):
-                out.append(f"  - Fixed in: {fix_text(d['fix_to'])}")
-            out.append(f"  - How: {dep_how(d, root)}")
+                lines.append(f"  - Fixed in: {fix_text(d['fix_to'])}")
+            lines.append(f"  - How: {dep_how(d, root, grouped)}")
+            return lines
+        tests = [d for d in unsound if d.get("ships") is False]
+        for d in unsound:
+            if d.get("ships") is not False:
+                out += one_notice(d, False)
+        if tests:
+            out += test_only_heading(len(tests))
+            for d in tests:
+                out += one_notice(d, True)
     if unmaint:
         out.append(f"### Unmaintained ({len(unmaint)}): not vulnerabilities")
         out.append("Nobody maintains these any more, so future security problems won't "
