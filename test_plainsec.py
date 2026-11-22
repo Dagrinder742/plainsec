@@ -902,8 +902,11 @@ class TestOsvScanner(unittest.TestCase):
             via = REAL_CARGO_VIA(self.dir, "p/Cargo.lock", "borsh", "0.10.4", direct, ships=True)
         self.assertEqual(via, ["solana-program"])
         cmd = run.call_args[0][0]
-        self.assertIn("-i", cmd)
+        self.assertEqual(cmd[cmd.index("-i") + 1], "borsh@0.10.4")   # real bug: was "-e"
         self.assertEqual(cmd[cmd.index("-e") + 1], "no-dev")      # shipping: no dev paths
+        for i, part in enumerate(cmd):                         # every flag keeps its value
+            if part in ("-i", "-e", "--target", "--prefix", "--format"):
+                self.assertFalse(cmd[i + 1].startswith("-"), cmd)
         with mock.patch.object(plainsec.shutil, "which", return_value=None):
             self.assertIsNone(REAL_CARGO_VIA(self.dir, "p/Cargo.lock", "borsh", "0.10.4", direct))
 

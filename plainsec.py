@@ -555,7 +555,10 @@ def cargo_via(root, source, name, version, direct, ships=None):
     cmd = ["cargo", "tree", "-i", f"{name}@{version}", "--target", "all",
            "--prefix", "none", "--format", "{p}", "--locked"]
     if ships:
-        cmd[3:3] = ["-e", "no-dev"]
+        # appended, never inserted: an insert at [3] once split `-i` from its
+        # crate (`-i -e no-dev borsh@…`), cargo failed, and the two crates
+        # that ship got the old advice
+        cmd += ["-e", "no-dev"]
     try:
         proc = subprocess.run(cmd, cwd=folder, capture_output=True, text=True,
                               timeout=120)  # list form, no shell
