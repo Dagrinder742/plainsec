@@ -783,12 +783,21 @@ SECRET_FIX_FILES = ("Move it out of the code into an environment variable or key
                     "If this folder was ever pushed or shared, rotate the key too.")
 
 
+# Real case: OXX-Terminal's `API_KEY_ID = "…"` (a real Kalshi key) got
+# "IDs usually aren't secret" and was counted as probably harmless.
+KEY_ID_HINT = ("the name says it's an API key ID: half of a login (it's paired with a "
+               "secret or private key). Treat it as private; if the other half was "
+               "ever committed too, rotate the key")
+
+
 def name_hint(match):
     """Look only at the setting's NAME (before : or =) in gitleaks' redacted
     match, never the value. Returns a short note, or ""."""
     name = re.split(r"[:=]", match or "", maxsplit=1)[0].strip().strip("\"'` ").lower()
     if not name or len(name) > 60:
         return ""
+    if re.search(r"key[-_ ]?id$", name):
+        return KEY_ID_HINT
     if re.search(r"hash|sha\d*|digest|checksum|fingerprint", name):
         return ("the name says it's a hash: a one-way fingerprint, not the key itself. "
                 "Usually fine")
@@ -1194,7 +1203,7 @@ def headline(shown, hidden, deps, skipped=None, deps_checked=True, secrets=None,
         if secrets == "not-checked":
             parts.append("secrets NOT CHECKED")
         else:
-            likely = sum(1 for f in secrets if f.get("hint"))
+            likely = sum(1 for f in secrets if f.get("hint") and f["hint"] != KEY_ID_HINT)
             parts.append(f"{len(secrets)} possible secret{'s' if len(secrets) != 1 else ''}"
                          + (f" ({likely} named like IDs/hashes)" if likely else ""))
     parts += [dep_part,

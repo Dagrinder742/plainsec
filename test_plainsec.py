@@ -636,6 +636,20 @@ class TestSecrets(unittest.TestCase):
         self.assertEqual(out.count("the name says"), 2)   # plain 'token' gets no hint
         self.assertNotIn("REDACTED", out)
 
+    def test_api_key_id_is_not_played_down(self):
+        # Real case: OXX-Terminal `API_KEY_ID = "837934ae-…"` was a real Kalshi
+        # key ID, labelled "IDs usually aren't secret" and counted as harmless.
+        for m in ('API_KEY_ID = "REDACTED"', 'access_key_id: "REDACTED"', '"key-id": "REDACTED"'):
+            self.assertIs(plainsec.name_hint(m), plainsec.KEY_ID_HINT, m)
+        self.assertIn("IDs usually", plainsec.name_hint('client_order_id: "REDACTED"'))
+        k = leak("generic-api-key", "kalshi/client.py", 14, "044b5640ffff")
+        k["Match"] = 'API_KEY_ID = "REDACTED"'
+        o = leak("generic-api-key", "kalshi/openapi.yaml", 7877, "1523accfffff")
+        o["Match"] = 'client_order_id: "REDACTED"'
+        _, out = self.run_with([k, o])
+        self.assertIn("**2 possible secrets (1 named like IDs/hashes)", out)
+        self.assertIn("half of a login", out)
+
     def test_name_hint_never_uses_the_value(self):
         self.assertEqual(plainsec.name_hint('token = "sha256_looking_value"'), "")
         self.assertIn("hash", plainsec.name_hint('"api_token_hash": "x"'))
