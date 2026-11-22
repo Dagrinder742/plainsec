@@ -1151,6 +1151,22 @@ def compare(old, code, deps, code_ok, deps_ok, secrets=None, secrets_ok=False):
             if gone[item["fp"]]:
                 gone[item["fp"]] -= 1
                 out["fixed"].append(item)
+        # Same check + same flagged text + same file name (any case, any folder)
+        # = the file was renamed or moved, not a new problem. Real case:
+        # Matrix_Rain.py → matrix_rain.py showed "New: [HIGH] B605" + "Gone".
+        out["moved"] = []
+        for f in list(out["new"]):
+            if not f.get("text"):
+                continue
+            for item in out["fixed"]:
+                parts = item["fp"].split("|", 2)
+                if (len(parts) == 3 and parts[0] == f["id"] and parts[2] == f["text"]
+                        and parts[1] != f["file"]
+                        and Path(parts[1]).name.lower() == Path(f["file"]).name.lower()):
+                    out["moved"].append((f, parts[1]))
+                    out["new"].remove(f)
+                    out["fixed"].remove(item)
+                    break
     if out["deps_compared"]:
         before = {_upgrade_dep_fp(fp) for fp in old["deps"]}
         now = set(dep_fingerprints(deps))
@@ -1175,7 +1191,7 @@ def render_changes(ch, hidden_ids, skipped_ids):
         if ch["checked"][part] and not ch[f"{part}_compared"]:
             out.append(f"- {label}: no earlier result to compare with yet.")
     any_change = (ch["new"] or ch["fixed"] or ch["new_deps"] or ch["fixed_deps"]
-                  or ch["new_secrets"] or ch["gone_secrets"])
+                  or ch["new_secrets"] or ch["gone_secrets"] or ch.get("moved"))
     if not any_change:
         if ch["code_compared"] or ch["deps_compared"] or ch["secrets_compared"]:
             out.append("Nothing changed in what was checked.")
@@ -1194,9 +1210,14 @@ def render_changes(ch, hidden_ids, skipped_ids):
             tag = (" — skipped by .plainsec" if id(f) in skipped_ids
                    else " — test file, hidden" if id(f) in hidden_ids else "")
             lines.append(f"  - [{f['severity']}] {f['id']} `{f['file']}` line {f['line']}{tag}")
-        lines += [f"  - dependency {d.split('|')[1]} {d.split('|')[2]} (`{d.split('|')[0]}`)"
+        lines += [f"  - dependency `{d.split('|')[1]}`: {d.split('|')[2]} (`{d.split('|')[0]}`)"
                   for d in ch["new_deps"]]
         out += capped(lines)
+    if ch.get("moved"):
+        out.append(f"**Moved or renamed ({len(ch['moved'])}):** same findings in a renamed "
+                   "or moved file, so not counted as new or gone.")
+        out += capped([f"  - {f['id']} `{f['file']}` line {f['line']} (was `{was}`)"
+                       for f, was in ch["moved"]])
     if ch["fixed"] or ch["fixed_deps"] or ch["gone_secrets"]:
         total = len(ch["fixed"]) + len(ch["fixed_deps"]) + len(ch["gone_secrets"])
         out.append(f"**Gone since last time ({total}):**")
@@ -1204,7 +1225,7 @@ def render_changes(ch, hidden_ids, skipped_ids):
         lines += [f"  - possible secret {fp.split('|')[0]} `{fp.split('|')[1]}` "
                   "(no longer found — if it was real, it still needed rotating)"
                   for fp in ch["gone_secrets"]]
-        lines += [f"  - dependency {d.split('|')[1]} {d.split('|')[2]} (`{d.split('|')[0]}`)"
+        lines += [f"  - dependency `{d.split('|')[1]}`: {d.split('|')[2]} (`{d.split('|')[0]}`)"
                   for d in ch["fixed_deps"]]
         out += capped(lines)
     return out + [""]
@@ -1218,7 +1239,8 @@ def changes_headline(ch):
     g = len(ch["fixed"]) + len(ch["fixed_deps"]) + len(ch["gone_secrets"])
     if not (ch["code_compared"] or ch["deps_compared"] or ch["secrets_compared"]):
         return "no comparison possible"
-    return f"{n} new, {g} gone since last scan"
+    m = len(ch.get("moved") or [])
+    return f"{n} new, {g} gone" + (f", {m} moved" if m else "") + " since last scan"
 
 
 # ---------------------------------------------------------------------------

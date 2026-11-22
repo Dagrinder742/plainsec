@@ -426,6 +426,19 @@ class TestSinceLastScan(unittest.TestCase):
         self.assertIn("first scan (not saved: --no-save)", out)
         self.assertIn("first scan (baseline saved)", self.scan(r))   # really nothing was saved
 
+    def test_renamed_file_is_moved_not_new(self):
+        # Real case: anvil/Matrix_Rain.py → anvil/matrix_rain.py showed
+        # "New: [HIGH] B605" plus "Gone".
+        line = 'os.system("cls" if os.name == "nt" else "clear")'
+        self.scan([bfind("B605", "anvil/Matrix_Rain.py", 23, line, "HIGH")])
+        out = self.scan([bfind("B605", "anvil/matrix_rain.py", 23, line, "HIGH")])
+        self.assertIn("0 new, 0 gone, 1 moved since last scan", out)
+        self.assertIn("B605 `anvil/matrix_rain.py` line 23 (was `anvil/Matrix_Rain.py`)", out)
+        self.assertNotIn("**New", out)
+        # a different file name is NOT paired: that's a real new + gone
+        out = self.scan([bfind("B605", "anvil/other.py", 23, line, "HIGH")])
+        self.assertIn("1 new, 1 gone since last scan", out)
+
     def test_moved_line_is_not_new_or_gone(self):
         self.scan([bfind("B602", "a.py", 5, "run(cmd, shell=True)", "HIGH")])
         out = self.scan([bfind("B602", "a.py", 40, "run(cmd, shell=True)", "HIGH")])
@@ -476,8 +489,9 @@ class TestSinceLastScan(unittest.TestCase):
                             "vulns": [{"id": vid, "fix_versions": [], "description": ""}]}]
         self.scan([], deps=dep("OLD-1"))
         out = self.scan([], deps=dep("NEW-2"))
-        self.assertIn("dependency requests NEW-2", out)
-        self.assertIn("dependency requests OLD-1", out)
+        # name in backticks (real case read "dependency url GHSA-…")
+        self.assertIn("dependency `requests`: NEW-2", out)
+        self.assertIn("dependency `requests`: OLD-1", out)
 
     def test_no_save(self):
         self.scan([], extra=["--no-save"])
