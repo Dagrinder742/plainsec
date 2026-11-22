@@ -979,9 +979,25 @@ class TestOsvScanner(unittest.TestCase):
         d = {"ecosystem": "crates.io", "source": "p/Cargo.lock", "name": "borsh",
              "version": "0.10.4", "fix_to": "1.0.0", "direct": False, "via": ["solana-program"]}
         t = plainsec.dep_how(d)
-        self.assertIn("comes in through `solana-program` (which is in your Cargo.toml)", t)
-        self.assertIn("still uses borsh 0.10.4, there's nothing to do on your side", t)
+        self.assertIn("comes in through `solana-program` (which is in your Cargo.toml). "
+                      "Update that crate.", t)
+        self.assertNotIn("wait for its authors", t)       # said once per report instead
         self.assertNotIn("cargo tree", t)
+
+    def test_wait_note_and_no_score_said_once(self):
+        # Real case: trinity_master repeated "…nothing to do on your side but wait"
+        # 9 times; "no severity score" was never explained.
+        (self.dir / "app" / "program").mkdir(parents=True)
+        with mock.patch.object(plainsec, "cargo_via", return_value=["solana-program"]):
+            _, out = self.run_cli()
+        self.assertEqual(out.count("wait for its authors"), 1)
+        self.assertGreaterEqual(out.count("Update that crate."), 1)
+        d = {"name": "url", "version": "2.5.8", "ecosystem": "crates.io", "source": "p/Cargo.lock",
+             "severity": "NO SCORE", "ids": ["GHSA-hrj5-67jp-wqp9"], "summary": "Stack overflow",
+             "fix_to": None, "no_fix": []}
+        text = "\n".join(plainsec.render_deps([d, dict(d, name="x")], False, {"tool": "osv-scanner"}))
+        self.assertEqual(text.count("doesn't mean harmless"), 1)
+        self.assertNotIn("tests only", text)
 
     # ---- tests-only vs ships (cargo tree -e no-dev), real output format ----
     REAL_TREE = ("borsh v0.10.4\nborsh v0.10.4 (*)\nborsh v1.8.1\ncurve25519-dalek v4.1.3\n"

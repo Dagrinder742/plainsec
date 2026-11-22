@@ -657,11 +657,11 @@ def _dep_how(d, root=None):
         if via:
             names = ", ".join(f"`{v}`" for v in via[:3]) + (" and others" if len(via) > 3 else "")
             one = len(via) == 1
+            # the "if the newest version still uses it, wait" note is said ONCE at
+            # the top of the section (real case: it was repeated 9 times)
             return (f"`{name}` isn't in your Cargo.toml: it comes in through {names} "
-                    f"({'which is' if one else 'which are'} in your Cargo.toml). Updating "
-                    f"{'that crate' if one else 'those crates'} is how it gets fixed. If the "
-                    f"newest version still uses {name} {d['version']}, there's nothing to do "
-                    "on your side but wait for its authors.")
+                    f"({'which is' if one else 'which are'} in your Cargo.toml). Update "
+                    f"{'that crate' if one else 'those crates'}.")
         return (f"`{name}` isn't in your Cargo.toml: another crate pulls it in. To see "
                 f"which, run `{pre}cargo tree -i {name}@{d['version']} --depth 1`{loc}, then "
                 "update that crate instead" + (" (here that's usually one of your solana / anchor crates)"
@@ -1636,8 +1636,16 @@ def render_deps(deps, failed, info, root=None):
                    "Install osv-scanner to check every dependency file (Rust, Node, "
                    "subfolders too).")
     if info.get("cargo_checked"):
-        out.append("Rust crates were checked with `cargo tree`: \"tests only\" means a crate "
-                   "comes in only through dev-dependencies, so it isn't built into your program.")
+        out.append("Rust crates were checked with `cargo tree`, so crates used only by "
+                   "tests are listed separately.")
+    every = deps + [n for n in info.get("notices") or [] if n.get("kind") != "unmaintained"]
+    if any(d.get("via") for d in every):
+        out.append("When a crate comes in through another one, updating that one is the "
+                   "fix. If even its newest version still uses the old crate, there's "
+                   "nothing to do on your side but wait for its authors.")
+    if any(d.get("severity") == "NO SCORE" for d in deps):
+        out.append("\"No severity score\" means the advisory wasn't given a rating. It "
+                   "doesn't mean harmless: read what it means and decide.")
     elif info.get("cargo_missing"):
         out.append("Install Rust's `cargo` (or fix `cargo tree` in that folder) to tell "
                    "test-only crates apart from ones that ship in your program.")
