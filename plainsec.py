@@ -31,6 +31,7 @@ out), so nothing disappears silently. Secrets are never skipped.
 import fnmatch
 
 import argparse
+import ast
 import hashlib
 import json
 import os
@@ -72,10 +73,14 @@ BANDIT_PLAIN = {
     "B108": ("A fixed temp-file path (like /tmp/x) is used. Another program can "
              "create or swap that file first.",
              "Use `tempfile.NamedTemporaryFile()` or `tempfile.mkdtemp()`."),
-    "B110": ("`except: pass` hides every error, so real failures go unnoticed.",
+    "B110": ("An `except` that only does `pass` hides the errors it catches, so "
+             "real failures go unnoticed.",
              "Catch the specific exception and at least log it."),
-    "B112": ("`except: continue` hides every error inside a loop.",
-             "Catch the specific exception and log it before continuing."),
+    "B112": ("An `except` that only does `continue` hides the errors it catches "
+             "inside a loop.",
+             "Catch only the error you expect (e.g. `except ValueError:`), so "
+             "anything else still shows up. Logging is optional when skipping bad "
+             "input is the point."),
     "B113": ("A web request has no timeout, so it can hang forever.",
              "Add `timeout=10` (or similar) to the requests call."),
     "B201": ("A Flask app runs with debug=True, which lets visitors run code.",
@@ -120,7 +125,9 @@ BANDIT_PLAIN = {
              "Usually fine on your own device; use a full path if worried."),
     "B608": ("SQL is built by gluing strings together. That's how SQL "
              "injection happens.",
-             "Use placeholders: `cur.execute('... WHERE id = ?', (id,))`."),
+             "Use placeholders: `cur.execute('... WHERE id = ?', (id,))`. If the "
+             "glued-in value is a number you set in code (like a LIMIT), the risk "
+             "is low, but `LIMIT ?` is still the clean fix."),
 }
 
 SEVERITY_ORDER = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
@@ -686,9 +693,88 @@ def flagged_line(code, line_number):
     return ""
 
 
+_DEF = re.compile(r"^(\s*)(?:async\s+)?def\s+(\w+)")
+
+
+def enclosing_function(path, line, cache):
+    """Name of the def that contains `line`, or "". Reads the file once."""
+    if path not in cache:
+        try:
+            cache[path] = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            cache[path] = []
+    lines = cache[path]
+    if not 0 < line <= len(lines):
+        return ""
+    target = lines[line - 1]
+    indent = len(target) - len(target.lstrip())
+    for i in range(line - 2, -1, -1):
+        m = _DEF.match(lines[i])
+        if m and len(m.group(1)) < indent:
+            return m.group(2)
+        stripped = lines[i].strip()
+        if stripped and not stripped.startswith(("#", "@")) and \
+                len(lines[i]) - len(lines[i].lstrip()) == 0 and not m:
+            return ""                       # back at module level
+    return ""
+
+
+def is_selftest_name(name):
+    """Real case: macro_engine.py's asserts sit in cmd_selftest()."""
+    return bool(re.search(r"(^|_)(self_?test|tests?)(_|$)|^test", name or "", re.I))
+
+
+def _fixed(node):
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return True
+    if isinstance(node, ast.IfExp):
+        return _fixed(node.body) and _fixed(node.orelse)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return _fixed(node.left) and _fixed(node.right)
+    if isinstance(node, (ast.List, ast.Tuple)):
+        return all(_fixed(e) for e in node.elts)
+    return False
+
+
+def fixed_command(text):
+    """'empty', 'fixed' or ''. Reads ONLY the flagged line. Real cases:
+    os.system("cls" if os.name == "nt" else "clear") was a HIGH B605 (fixed
+    either way); os.system("") turns on ANSI colors in Windows consoles."""
+    try:
+        tree = ast.parse((text or "").strip())
+    except (SyntaxError, ValueError):
+        return ""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and node.args:
+            arg = node.args[0]
+            if isinstance(arg, ast.Constant) and arg.value == "":
+                return "empty"
+            if _fixed(arg):
+                return "fixed"
+            return ""
+    return ""
+
+
+COMMAND_CHECKS = {"B602", "B605", "B607"}
+
+
+def line_note(f):
+    """Short note after a line number, from the flagged line only."""
+    if empty_password_value(f):
+        return "empty value, likely not a secret"
+    if f["id"] in COMMAND_CHECKS:
+        kind = fixed_command(f.get("text"))
+        if kind == "empty":
+            return "empty command: the usual trick to turn on colors in Windows consoles; harmless"
+        if kind == "fixed" and f["severity"] != "LOW":
+            return "fixed text either way, so likely safe"
+    return ""
+
+
 def parse_bandit(data, root=None):
     findings = []
     seen = set()
+    sources = {}                    # file text cache for enclosing_function
     for r in (data or {}).get("results", []):
         tid = r.get("test_id", "?")
         meaning, fix = BANDIT_PLAIN.get(
@@ -707,13 +793,16 @@ def parse_bandit(data, root=None):
         if (tid, path, line) in seen:      # bandit can report a line twice
             continue
         seen.add((tid, path, line))
+        in_test = is_test_file(path)
+        if not in_test and root and tid in NORMAL_IN_TESTS:
+            in_test = is_selftest_name(enclosing_function(Path(root) / path, line, sources))
         findings.append({
             "id": tid,
             "severity": r.get("issue_severity", "LOW").upper(),
             "file": path,
             "line": line,
             "text": flagged_line(r.get("code", ""), line),
-            "in_test": is_test_file(path),
+            "in_test": in_test,
             "meaning": meaning,
             "fix": fix,
         })
@@ -1204,16 +1293,16 @@ def merge_copies(code, root):
 
 def where_lines(findings):
     """One line per file: 'path — lines 3, 9, 12 (+4 more)'."""
-    per_file, empty = {}, set()
+    per_file, notes = {}, {}
     for f in findings:
         per_file.setdefault(f["file"], []).append(f["line"])
-        if empty_password_value(f):
-            empty.add((f["file"], f["line"]))
+        note = line_note(f)
+        if note:
+            notes[(f["file"], f["line"])] = note
     out = []
     for path, lines in sorted(per_file.items(), key=lambda kv: (-len(kv[1]), kv[0])):
         lines = sorted(set(lines))
-        shown = ", ".join(str(n) + (" (empty value, likely not a secret)"
-                                    if (path, n) in empty else "")
+        shown = ", ".join(str(n) + (f" ({notes[(path, n)]})" if (path, n) in notes else "")
                           for n in lines[:MAX_LINES_SHOWN])
         extra = len(lines) - MAX_LINES_SHOWN
         label = "line" if len(lines) == 1 else "lines"

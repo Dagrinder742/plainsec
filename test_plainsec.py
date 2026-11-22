@@ -1202,6 +1202,46 @@ class TestTermuxWording(unittest.TestCase):
         self.assertIn("test_sandbox_tool.py` — line 1372 — test file, often harmless there", report)
         self.assertIn("`app/run.py` — line 3\n", report + "\n")
 
+    def test_asserts_in_selftest_function_count_as_tests(self):
+        # Real case: OXX-Terminal kalshi/predictions/macro_engine.py, the B101s at
+        # 757+ sit inside `def cmd_selftest(_args):`.
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp, "macro_engine.py")
+            src.write_text("def ema(x, n):\n    return 1\n\n\n"
+                           "def cmd_selftest(_args):\n    assert ema([5.0], 20) == 5.0\n\n"
+                           "def run(x):\n    assert x > 0\n")
+            code = plainsec.parse_bandit({"results": [
+                finding("B101", str(src), 6), finding("B101", str(src), 9)]}, root=tmp)
+            by_line = {f["line"]: f["in_test"] for f in code}
+            self.assertEqual(by_line, {6: True, 9: False})
+        for name, yes in [("cmd_selftest", True), ("test_x", True), ("run_tests", True),
+                          ("self_test", True), ("latest", False), ("attest", False),
+                          ("contest_entry", False)]:
+            self.assertEqual(plainsec.is_selftest_name(name), yes, name)
+
+    def test_fixed_commands_are_noted(self):
+        # Real cases: trinity_master matrix_rain.py:23 (HIGH B605) and
+        # OXX-Terminal cv.py:153 os.system("").
+        rain = 'os.system("cls" if os.name == "nt" else "clear")'
+        self.assertEqual(plainsec.fixed_command(rain), "fixed")
+        self.assertEqual(plainsec.fixed_command('os.system("")'), "empty")
+        self.assertEqual(plainsec.fixed_command("os.system(cmd)"), "")
+        self.assertEqual(plainsec.fixed_command('os.system("ls " + path)'), "")
+        self.assertEqual(plainsec.fixed_command("os.system(\"a\" if x else cmd)"), "")
+        self.assertEqual(plainsec.fixed_command("subprocess.run(cmd, cwd=cwd,"), "")   # cut-off line
+        code = plainsec.parse_bandit({"results": [
+            dict(bfind("B605", "anvil/matrix_rain.py", 23, rain, "HIGH")),
+            dict(bfind("B605", "cv.py", 153, 'os.system("")'))]})
+        report = plainsec.build_report("x", code, [], [])
+        self.assertIn("line 23 (fixed text either way, so likely safe)", report)
+        self.assertIn("line 153 (empty command: the usual trick to turn on colors", report)
+
+    def test_b112_and_b608_advice_fits_real_lines(self):
+        b112 = plainsec.BANDIT_PLAIN["B112"]
+        self.assertIn("`except ValueError:`", b112[1])
+        self.assertIn("Logging is optional", b112[1])
+        self.assertIn("LIMIT ?", plainsec.BANDIT_PLAIN["B608"][1])
+
     def test_b103_in_tests_is_hidden(self):
         # Real case: OXX-Terminal's only "fix first" item was B103 in a test.
         code = plainsec.parse_bandit({"results": [
