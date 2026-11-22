@@ -8,6 +8,7 @@ import contextlib
 import io
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -375,6 +376,14 @@ class TestSinceLastScan(unittest.TestCase):
         self.assertIn("0 new, 0 gone since last scan", second)
         self.assertIn("Nothing changed in what was checked.", second)
 
+    def test_b605_wording_follows_severity(self):
+        # Real case: OXX-Terminal's six LOW B605s (fixed commands) read as
+        # alarming as trinity_master's HIGH one.
+        low = plainsec.parse_bandit({"results": [dict(bfind("B605", "a.py", 3, 'os.system("clear")'))]})
+        high = plainsec.parse_bandit({"results": [dict(bfind("B605", "b.py", 3, "os.system(cmd)", "HIGH"))]})
+        self.assertIn("Safe as written", low[0]["meaning"])
+        self.assertIn("built from variables", high[0]["meaning"])
+
     def test_report_says_where_paths_start(self):
         # Real case: report said `anvil/Matrixenc.py` line 24; the user ran
         # `nano anvil/Matrixenc.py` from ~ and got an empty new file.
@@ -511,6 +520,31 @@ class TestSecrets(unittest.TestCase):
                                 "--audit-json", str(self.dir / "a.json"),
                                 "--secrets-json", str(g), *extra])
         return rc, out.getvalue()
+
+    def test_same_file_secrets_grouped_with_one_check(self):
+        # Real case: OXX-Terminal listed kalshi/openapi.yaml 12 times, each
+        # with its own check command.
+        leaks = []
+        for n in (7877, 7964, 7998):
+            l = leak("generic-api-key", "kalshi/openapi.yaml", n, "1523accfffff", "2026-09-12T00:00:00Z")
+            l["Match"] = 'market_id: "REDACTED"'
+            leaks.append(l)
+        leaks.append(leak("generic-api-key", "kalshi/howto.md", 61, "1523accfffff"))
+        _, out = self.run_with(leaks)
+        self.assertIn("**4 possible secrets (3 named like IDs/hashes)", out)
+        self.assertIn("`kalshi/openapi.yaml` — 3 places (lines 7877, 7964, 7998)", out)
+        self.assertIn("IDs usually aren't secret on their own (all of them)", out)
+        self.assertEqual(out.count("kalshi/openapi.yaml' |"), 1)          # one check command
+        self.assertIn("sed -n '7877{=;p};7964{=;p};7998{=;p}' | paste - -", out)
+        self.assertIn("`kalshi/howto.md` line 61", out)
+
+    def test_multi_line_check_command_runs(self):
+        f = self.dir / "t.txt"
+        f.write_text("a\nb\nc\nd\n")
+        cmd = plainsec.view_command({"commit": None, "file": "t.txt", "line": [2, 4]}, self.dir)
+        cmd = cmd.replace(plainsec.shell_path(self.dir), str(self.dir))   # no ~ for /bin/sh
+        out = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True).stdout
+        self.assertEqual(out, "2\tb\n4\td\n")
 
     def test_secret_value_never_printed(self):
         raw = [leak("github-pat", "cfg.py", 3, "abc12345def", "2026-08-16T10:00:00Z")]

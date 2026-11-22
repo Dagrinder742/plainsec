@@ -111,7 +111,9 @@ BANDIT_PLAIN = {
     "B603": ("A command runs without a shell. Low risk; flagged so you check "
              "the inputs are trusted.",
              "Safe if the command list is built from fixed strings."),
-    "B605": ("A command is started through the shell (os.system etc.).",
+    "B605": ("A command built from variables is started through the shell "
+             "(os.system etc.). If any part comes from a user, a file or an AI "
+             "model, it can be bent into running other commands.",
              "Use `subprocess.run([...])` with a list instead."),
     "B607": ("A program is started by name only (e.g. 'git'), so whichever "
              "'git' is first on PATH gets run.",
@@ -125,6 +127,21 @@ SEVERITY_ORDER = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
 
 # Checks that are normal inside test files: pytest is built on assert, and
 # tests use fake passwords, temp paths and subprocess on purpose.
+# bandit gives some checks LOW when the command is fixed text and HIGH when
+# it's built from variables; the wording has to match. Real case: OXX-Terminal
+# had six LOW B605s like os.system("clear") that read as alarming as a HIGH.
+BANDIT_PLAIN_BY_SEVERITY = {
+    ("B605", "LOW"): ("A fixed command (plain text, like `os.system(\"clear\")`) is "
+                      "started through the shell. Safe as written; it only becomes "
+                      "risky if someone later builds the command from input.",
+                      "Fine to leave. If you edit it, `subprocess.run([...])` with a "
+                      "list is the safer habit."),
+    ("B602", "LOW"): ("A fixed command (plain text) runs with shell=True. Safe as "
+                      "written; it only becomes risky if someone later builds the "
+                      "command from input.",
+                      "Fine to leave. If you edit it, pass a list and drop shell=True."),
+}
+
 NORMAL_IN_TESTS = {"B101", "B105", "B106", "B107", "B108", "B404", "B603"}
 
 # Packages you should NOT upgrade with pip itself on some systems.
@@ -675,6 +692,9 @@ def parse_bandit(data, root=None):
         meaning, fix = BANDIT_PLAIN.get(
             tid, (r.get("issue_text", "No description."),
                   f"See {r.get('more_info', 'bandit docs')}"))
+        sev_text = BANDIT_PLAIN_BY_SEVERITY.get((tid, r.get("issue_severity", "LOW").upper()))
+        if sev_text:
+            meaning, fix = sev_text
         path = r.get("filename", "?")
         if root:
             try:
@@ -773,7 +793,7 @@ def name_hint(match):
         return ("the name says it's a hash: a one-way fingerprint, not the key itself. "
                 "Usually fine")
     if re.search(r"(^|[^a-z])(id|uuid)$", name) or name.endswith("_id"):
-        return "the name says it's an ID: IDs usually aren't secret"
+        return "the name says it's an ID: IDs usually aren't secret on their own"
     return ""
 
 
@@ -790,11 +810,17 @@ def view_command(f, root=None):
     """Command to look at the flagged line yourself (prints it locally only).
     With root, it works from any folder: `git -C` names the repo. Real case:
     the user ran the check from another repo and got "invalid object name"."""
+    lines = f["line"] if isinstance(f["line"], list) else [f["line"]]
+    # several lines: one sed prints them all, with their numbers so you can
+    # tell them apart ('7877p;7964p' → "7877: …")
+    sed = (f"sed -n {lines[0]}p" if len(lines) == 1 else
+           "sed -n '" + ";".join(f"{n}{{=;p}}" for n in lines) + "' | paste - -")
     if f["commit"]:
         repo = f"-C {shell_path(root)} " if root is not None else ""
-        return f"git {repo}show {f['commit']}:'{f['file']}' | sed -n {f['line']}p"
+        return f"git {repo}show {f['commit']}:'{f['file']}' | {sed}"
     prefix = shell_path(root) + "/" if root is not None else ""
-    return f"sed -n {f['line']}p {prefix}'{f['file']}'"
+    return f"{sed} {prefix}'{f['file']}'" if len(lines) == 1 else \
+        f"cat {prefix}'{f['file']}' | {sed}"
 
 
 def secret_meaning(rule, description):
@@ -1165,8 +1191,12 @@ def headline(shown, hidden, deps, skipped=None, deps_checked=True, secrets=None,
                 if deps_checked else "dependencies NOT CHECKED")
     parts = []
     if secrets is not None:          # None = secrets feature not in this report
-        parts.append("secrets NOT CHECKED" if secrets == "not-checked" else
-                     f"{len(secrets)} possible secret{'s' if len(secrets) != 1 else ''}")
+        if secrets == "not-checked":
+            parts.append("secrets NOT CHECKED")
+        else:
+            likely = sum(1 for f in secrets if f.get("hint"))
+            parts.append(f"{len(secrets)} possible secret{'s' if len(secrets) != 1 else ''}"
+                         + (f" ({likely} named like IDs/hashes)" if likely else ""))
     parts += [dep_part,
              f"{urgent} to fix first" + (f" ({high} high)" if high else ""),
              f"{low} low-priority"]
@@ -1292,8 +1322,23 @@ def render_secrets(secrets, info, root=None):
         else:
             out.append(f"- Fix: {base_fix}")
         out.append("- Where:")
+        # Same file + commit + notes → one bullet and one check command.
+        # Real case: OXX-Terminal listed kalshi/openapi.yaml 12 times.
+        groups = {}
         for f in items:
-            bits = [f"`{f['file']}` line {f['line']}"]
+            key = (f["file"], f["commit"], f["still_there"], f["in_test"], f.get("hint"),
+                   bool(f.get("generic")))
+            groups.setdefault(key, []).append(f)
+        for group in groups.values():
+            f = group[0]
+            lines = sorted(g["line"] for g in group)
+            if len(lines) == 1:
+                bits = [f"`{f['file']}` line {lines[0]}"]
+            else:
+                bits = [f"`{f['file']}` — {len(lines)} places (lines "
+                        + ", ".join(str(n) for n in lines[:MAX_LINES_SHOWN])
+                        + (f" +{len(lines) - MAX_LINES_SHOWN} more" if len(lines) > MAX_LINES_SHOWN else "")
+                        + ")"]
             if f["commit"]:
                 bits.append(f"first committed in {f['commit']}" + (f" ({f['date']})" if f["date"] else ""))
                 if not f["still_there"]:
@@ -1301,10 +1346,10 @@ def render_secrets(secrets, info, root=None):
             if f["in_test"]:
                 bits.append("test file: probably a fake value, but check")
             if f.get("hint"):
-                bits.append(f["hint"])
+                bits.append(f["hint"] + (" (all of them)" if len(lines) > 1 else ""))
             out.append("  - " + " — ".join(bits))
             if f.get("generic"):
-                out.append(f"    - check: `{view_command(f, root)}`")
+                out.append(f"    - check: `{view_command(dict(f, line=lines), root)}`")
     return out + [""]
 
 
