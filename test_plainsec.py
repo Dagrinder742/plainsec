@@ -1212,6 +1212,33 @@ class TestTermuxWording(unittest.TestCase):
         self.assertIn("- B103: 1", report)
         self.assertNotIn("test_sandbox_tool.py", report)
 
+    def test_copies_never_hide_a_finding_in_real_code(self):
+        # Real case: v0.1.12 merged copies BEFORE .plainsec skips, so skipped
+        # went 60 → 57. If the kept copy is skipped, the real-code copy vanished.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for d in ("tools", "src/deep", "tests"):
+                (root / d).mkdir(parents=True)
+            for f in ("tools/a.py", "src/deep/a.py", "tests/b.py", "src/deep/b.py"):
+                (root / f).write_text("same\n" if f.endswith("a.py") else "other\n")
+            (root / ".plainsec").write_text("tools/\n")
+            b = root / "b.json"
+            b.write_text(json.dumps({"results": [
+                finding("B110", str(root / "tools/a.py"), 3),
+                finding("B110", str(root / "src/deep/a.py"), 3),
+                finding("B110", str(root / "tests/b.py"), 4),
+                finding("B110", str(root / "src/deep/b.py"), 4)]}))
+            a = root / "a.json"; a.write_text(json.dumps({"dependencies": []}))
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()), \
+                 mock.patch.dict(os.environ, {"PLAINSEC_STATE_DIR": tmp}):
+                plainsec.main([str(root), "--bandit-json", str(b), "--audit-json", str(a)])
+            out = out.getvalue()
+            self.assertIn("`src/deep/a.py` — line 3", out)          # not lost to the skip
+            self.assertIn("`tools/` — 1 finding", out)
+            # test copy vs real-code copy: the real-code path is kept
+            self.assertIn("`src/deep/b.py` — line 4 — same file also at `tests/b.py`", out)
+
     def test_identical_files_listed_once(self):
         # Real case: glitch_hunter.py and claude/misc/glitch_hunter.py are copies.
         with tempfile.TemporaryDirectory() as tmp:

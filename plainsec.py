@@ -1183,7 +1183,8 @@ def merge_copies(code, root):
     keep_of = {}
     for paths in digests.values():
         if len(paths) > 1:
-            paths.sort(key=lambda p: (len(Path(p).parts), len(p), p))
+            # keep a copy in real code over one in a test file, then the shortest
+            paths.sort(key=lambda p: (is_test_file(p), len(Path(p).parts), len(p), p))
             for p in paths[1:]:
                 keep_of[p] = paths[0]
     if not keep_of:
@@ -1602,8 +1603,6 @@ def main(argv=None):
     changes["saved"] = not args.no_save
     if not args.no_save:
         save_state(spath, snapshot(code, deps_history, code_ok, deps_ok, secrets, secrets_ok), old)
-    # after history (which keeps every copy), before counting for the report
-    code, n_copies = merge_copies(code, folder)
 
     skipped, unused = {}, []
     if not args.all:
@@ -1616,6 +1615,10 @@ def main(argv=None):
             (dep_skipped.setdefault(hit, []) if hit else deps_kept).append(d)
         deps, dep_info["skipped"] = deps_kept, dep_skipped
         unused = [p for p in unused if p not in dep_skipped]
+    # After history (which keeps every copy) AND after .plainsec skips: merging
+    # first once let the kept copy be a skipped one, so v0.1.12 showed 57
+    # skipped instead of 60 (real case). Only shown findings are merged.
+    code, n_copies = merge_copies(code, folder)
     skipped_ids = {id(f) for items in skipped.values() for f in items}
     hidden_ids = set() if args.all else {
         id(f) for f in code if f["in_test"] and f["id"] in NORMAL_IN_TESTS}
