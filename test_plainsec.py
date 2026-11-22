@@ -194,8 +194,10 @@ class TestRealRunFixes(unittest.TestCase):
 
     def test_test_files_detected(self):
         yes = ["tests/test_x.py", "sandbox-tool/tests/helpers.py", "claude/test_main_flow.py",
-               "a/b_test.py", "conftest.py"]
-        no = ["src/engine.py", "testkit/verify_skill.py", "contest.py"]
+               "a/b_test.py", "conftest.py",
+               # checkers: their asserts are the check (OXX-Terminal: ~140 of 163 B101)
+               "testkit/verify_skill.py", "sandbox-tool/bench/tasks/stack/verify.py"]
+        no = ["src/engine.py", "contest.py", "src/verify_notes.txt", "src/reverify.py"]
         for p in yes:
             self.assertTrue(plainsec.is_test_file(p), p)
         for p in no:
@@ -1194,11 +1196,43 @@ class TestTermuxWording(unittest.TestCase):
 
     def test_test_files_tagged_in_where_lines(self):
         code = plainsec.parse_bandit({"results": [
-            finding("B103", "sandbox-tool/tests/test_sandbox_tool.py", 1372, "MEDIUM"),
-            finding("B103", "app/run.py", 3, "MEDIUM")]})
+            finding("B110", "sandbox-tool/tests/test_sandbox_tool.py", 1372),
+            finding("B110", "app/run.py", 3)]})
         report = plainsec.build_report("x", code, [], [])
         self.assertIn("test_sandbox_tool.py` — line 1372 — test file, often harmless there", report)
         self.assertIn("`app/run.py` — line 3\n", report + "\n")
+
+    def test_b103_in_tests_is_hidden(self):
+        # Real case: OXX-Terminal's only "fix first" item was B103 in a test.
+        code = plainsec.parse_bandit({"results": [
+            finding("B103", "sandbox-tool/tests/test_sandbox_tool.py", 1372, "MEDIUM"),
+            finding("B103", "app/run.py", 3, "MEDIUM")]})
+        report = plainsec.build_report("x", code, [], [])
+        self.assertIn("1 to fix first", report)
+        self.assertIn("- B103: 1", report)
+        self.assertNotIn("test_sandbox_tool.py", report)
+
+    def test_identical_files_listed_once(self):
+        # Real case: glitch_hunter.py and claude/misc/glitch_hunter.py are copies.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "claude" / "misc").mkdir(parents=True)
+            (root / "glitch_hunter.py").write_text("x = 1\n")
+            (root / "claude" / "misc" / "glitch_hunter.py").write_text("x = 1\n")
+            (root / "other.py").write_text("y = 2\n")
+            code = plainsec.parse_bandit({"results": [
+                finding("B110", "glitch_hunter.py", 338),
+                finding("B110", "claude/misc/glitch_hunter.py", 338),
+                finding("B110", "other.py", 5)]})
+            kept, n = plainsec.merge_copies(code, root)
+            self.assertEqual(n, 1)
+            self.assertEqual(sorted(f["file"] for f in kept), ["glitch_hunter.py", "other.py"])
+            report = plainsec.build_report("x", kept, [], [], n_copies=n)
+            self.assertIn("2 low-priority", report)
+            self.assertIn("`glitch_hunter.py` — line 338 — same file also at "
+                          "`claude/misc/glitch_hunter.py`", report)
+            self.assertIn("1 file is an exact copy of another file here", report)
+            self.assertIn("Fixing one copy doesn't fix the others", report)
 
 
 class TestCli(unittest.TestCase):

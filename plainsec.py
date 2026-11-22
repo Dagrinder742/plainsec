@@ -142,7 +142,7 @@ BANDIT_PLAIN_BY_SEVERITY = {
                       "Fine to leave. If you edit it, pass a list and drop shell=True."),
 }
 
-NORMAL_IN_TESTS = {"B101", "B105", "B106", "B107", "B108", "B404", "B603"}
+NORMAL_IN_TESTS = {"B101", "B103", "B105", "B106", "B107", "B108", "B404", "B603"}
 
 # Packages you should NOT upgrade with pip itself on some systems.
 SELF_UPGRADE_NOTE = {
@@ -671,7 +671,9 @@ def is_test_file(path):
     name = parts[-1] if parts else ""
     return (any(p in ("tests", "test") for p in parts[:-1])
             or name.startswith("test_") or name.endswith("_test.py")
-            or name == "conftest.py")
+            or name == "conftest.py"
+            # checkers like bench/tasks/*/verify.py: their asserts ARE the check
+            or (name.startswith("verify") and name.endswith(".py")))
 
 
 def flagged_line(code, line_number):
@@ -1166,6 +1168,39 @@ def empty_password_value(finding):
             and bool(_EMPTY_VALUE.search(finding.get("text") or "")))
 
 
+def merge_copies(code, root):
+    """Files with identical content are listed once. Real case: OXX-Terminal
+    had glitch_hunter.py and claude/misc/glitch_hunter.py (and more copies),
+    so every finding counted twice. The kept path is the shortest one; the
+    others go in f["copies"]. Returns (kept findings, number of copy files)."""
+    digests = {}
+    for path in {f["file"] for f in code}:
+        try:
+            data = (Path(root) / path).read_bytes()
+        except OSError:
+            continue
+        digests.setdefault(hashlib.sha256(data).hexdigest(), []).append(path)
+    keep_of = {}
+    for paths in digests.values():
+        if len(paths) > 1:
+            paths.sort(key=lambda p: (len(Path(p).parts), len(p), p))
+            for p in paths[1:]:
+                keep_of[p] = paths[0]
+    if not keep_of:
+        return code, 0
+    others = {}
+    for p, k in keep_of.items():
+        others.setdefault(k, []).append(p)
+    kept = []
+    for f in code:
+        if f["file"] in keep_of:
+            continue
+        if f["file"] in others:
+            f = dict(f, copies=sorted(others[f["file"]]))
+        kept.append(f)
+    return kept, len(keep_of)
+
+
 def where_lines(findings):
     """One line per file: 'path — lines 3, 9, 12 (+4 more)'."""
     per_file, empty = {}, set()
@@ -1182,6 +1217,10 @@ def where_lines(findings):
         extra = len(lines) - MAX_LINES_SHOWN
         label = "line" if len(lines) == 1 else "lines"
         tag = " — test file, often harmless there" if is_test_file(path) else ""
+        copies = next((f.get("copies") for f in findings if f["file"] == path and f.get("copies")), None)
+        if copies:
+            tag += (" — same file also at " + ", ".join(f"`{c}`" for c in copies[:2])
+                    + (f" and {len(copies) - 2} more" if len(copies) > 2 else ""))
         out.append(f"  - `{path}` — {label} {shown}" + (f" (+{extra} more)" if extra > 0 else "") + tag)
     return out
 
@@ -1230,7 +1269,7 @@ def display_path(path):
 
 def build_report(name, code, deps, errors, show_all=False, skipped=None, unused=None,
                  changes=None, hidden_ids=frozenset(), skipped_ids=frozenset(),
-                 secrets=None, secrets_info=None, dep_info=None, root=None):
+                 secrets=None, secrets_info=None, dep_info=None, root=None, n_copies=0):
     """secrets: None = not part of this report; "not-checked"; or a list.
     root: the scanned folder; when given, the report says paths start there."""
     deps_failed = any(e.startswith("dependency scan") for e in errors)
@@ -1248,6 +1287,10 @@ def build_report(name, code, deps, errors, show_all=False, skipped=None, unused=
     if root is not None:
         out += [f"File paths below start from `{display_path(root)}`. To open one, "
                 f"first run `cd {shell_path(root)}`.", ""]
+    if n_copies:
+        out += [f"{n_copies} file{'s are exact copies' if n_copies != 1 else ' is an exact copy'} "
+                "of another file here, so their findings are listed once "
+                "(look for \"same file also at\"). Fixing one copy doesn't fix the others.", ""]
     for e in errors:
         out.append(f"> ⚠ Not checked: {e}")
     if errors:
@@ -1278,8 +1321,9 @@ def build_report(name, code, deps, errors, show_all=False, skipped=None, unused=
 
     if hidden:
         out.append("## 4. Hidden: normal in test files")
-        out.append("These checks are expected inside tests (pytest uses `assert`, "
-                   "tests use fake passwords). Run with `--all` to list them.")
+        out.append("These checks are expected inside tests and test checkers like "
+                   "`verify.py` (they use `assert` on purpose, fake passwords, temp files "
+                   "with loose permissions). Run with `--all` to list them.")
         counts = {}
         for f in hidden:
             counts[f["id"]] = counts.get(f["id"], 0) + 1
@@ -1558,6 +1602,8 @@ def main(argv=None):
     changes["saved"] = not args.no_save
     if not args.no_save:
         save_state(spath, snapshot(code, deps_history, code_ok, deps_ok, secrets, secrets_ok), old)
+    # after history (which keeps every copy), before counting for the report
+    code, n_copies = merge_copies(code, folder)
 
     skipped, unused = {}, []
     if not args.all:
@@ -1579,7 +1625,7 @@ def main(argv=None):
                           skipped_ids=skipped_ids,
                           secrets=secrets if secrets_ok else "not-checked",
                           secrets_info=secrets_data or {}, dep_info=dep_info,
-                          root=folder)
+                          root=folder, n_copies=n_copies)
     print(report)
 
     if args.out:
