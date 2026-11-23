@@ -1943,6 +1943,27 @@ class TestOsvDuplicates(unittest.TestCase):
         data["results"][1]["source"]["path"] = "/r/sub/requirements.txt"
         self.assertEqual(len(plainsec.parse_osv(data, root="/r")[0]), 2)
 
+
+class TestPlainTextForCommonChecks(unittest.TestCase):
+    def test_b310_and_b403_are_explained(self):
+        # Real case (Nov 23, extremely-vulnerable-flask-app): utils/profile_image.py:7
+        # `with urlopen(url) as response:` and routes/account.py:1
+        # `from pickle import dumps, loads` got bandit's own text, e.g. "Consider
+        # possible security implications associated with dumps module."
+        data = {"results": [
+            {"filename": "utils/profile_image.py", "line_number": 7, "issue_severity": "MEDIUM",
+             "test_id": "B310", "issue_text": "Audit url open for permitted schemes.", "more_info": "x"},
+            {"filename": "routes/account.py", "line_number": 1, "issue_severity": "LOW",
+             "test_id": "B403", "issue_text": "Consider possible security implications associated with dumps module.",
+             "more_info": "x"}]}
+        found = {f["id"]: f for f in plainsec.parse_bandit(data)}
+        self.assertIn("file://", found["B310"]["meaning"])
+        self.assertIn("https://", found["B310"]["fix"])
+        self.assertIn("`pickle` module is imported", found["B403"]["meaning"])
+        for f in found.values():
+            self.assertNotIn("Consider possible", f["meaning"])
+            self.assertNotIn("bandit.readthedocs", f["fix"])
+
 class TestRenderDepsNotes(unittest.TestCase):
     """The cargo notes are one if/elif; the NO SCORE note is its own if.
     v0.1.18 put the NO SCORE `if` between them, so `elif cargo_missing` hung

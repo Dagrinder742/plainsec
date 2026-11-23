@@ -94,6 +94,17 @@ BANDIT_PLAIN = {
     "B307": ("`eval()` runs text as code. Same danger as exec().",
              "Use `ast.literal_eval()` for data, or parse it yourself. If "
              "evaluating generated code is the point, see the B102 advice."),
+    # B310 / B403: real cases (extremely-vulnerable-flask-app utils/profile_image.py:7,
+    # routes/account.py:1) showed bandit's own text ("…associated with dumps module").
+    "B310": ("A URL is opened with `urllib`. It also opens `file://` (and other) "
+             "addresses, so if the address comes from a user or a file, it can be made "
+             "to read local files instead.",
+             "Check the address starts with `https://` (or `http://`) before opening it, "
+             "or only open fixed addresses."),
+    "B403": ("The `pickle` module is imported. Not a bug by itself, but loading pickle "
+             "data can run code hidden in it (see B301 if it's flagged too).",
+             "Fine if you only load pickle data your own program wrote; for anything "
+             "else, use JSON."),
     "B311": ("`random` is predictable. Fine for games, unsafe for tokens, "
              "passwords or anything secret.",
              "Use the `secrets` module for anything security-related."),
