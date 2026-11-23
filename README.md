@@ -141,6 +141,8 @@ same.
   that line shows up as one gone and one new.
 - An old bandit can crash on newer Python (Ubuntu's apt bandit 1.7.10 does on Python 3.14).
   plainsec then says which files weren't checked; `pipx install bandit` gets a current one.
+  Files that aren't valid Python at all (broken drafts) are named with Python's own error
+  and line, so you can tell them apart from a bandit problem.
 
 ## License
 

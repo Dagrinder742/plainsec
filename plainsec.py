@@ -848,40 +848,96 @@ def parse_bandit(data, root=None):
     return findings
 
 
+def python_error(path):
+    """'line N: message' if Python itself can't read the file, else ''.
+    Only parses (ast), never runs it. Real case (Nov 23, trinity_master): all
+    11 files bandit skipped were really broken drafts (unmatched ')', missing
+    blocks), and the old advice "upgrading bandit can help" was wrong."""
+    try:
+        ast.parse(Path(path).read_bytes(), str(path))
+    except SyntaxError as e:
+        return f"line {e.lineno}: {e.msg}" if e.lineno else e.msg
+    except ValueError as e:          # e.g. a null byte in the file
+        return str(e)
+    except (OSError, RecursionError, MemoryError):
+        return ""
+    return ""
+
+
 def bandit_unread(data, root=None):
-    """Files bandit skipped because it couldn't read them. -> (every file
-    failed?, warning text or None). Real case (Nov 23): Ubuntu's apt bandit
-    1.7.10 on Python 3.14 crashed on every file ("exception while scanning
-    file") and the report said "0 low-priority", an all-clear about nothing."""
+    """Files bandit skipped because it couldn't read them -> {"invalid":
+    {file: Python's own error}, "other": [files], "crashed": bool, "all":
+    every file failed and some weren't simply invalid Python}.
+    Real case (Nov 23): Ubuntu's apt bandit 1.7.10 on Python 3.14 crashed on
+    every file ("exception while scanning file") and the report said
+    "0 low-priority", an all-clear about nothing."""
+    out = {"invalid": {}, "other": [], "crashed": False, "all": False}
     errs = [e for e in (data or {}).get("errors") or [] if e.get("filename")]
     if not errs:
-        return False, None
+        return out
     def rel(p):
         if root:
-            try:
-                return Path(p).resolve().relative_to(Path(root).resolve()).as_posix()
+            try:      # same form as parse_bandit, so history can match files
+                return str(Path(p).resolve().relative_to(Path(root).resolve()))
             except ValueError:
                 pass
         return p
-    files = sorted({rel(e["filename"]) for e in errs})
+    for e in errs:
+        why = python_error(e["filename"])
+        if why:
+            out["invalid"][rel(e["filename"])] = why
+        elif rel(e["filename"]) not in out["other"]:
+            out["other"].append(rel(e["filename"]))
+            out["crashed"] |= "exception" in (e.get("reason") or "")
+    out["other"].sort()
     scanned = {k for k in ((data or {}).get("metrics") or {}) if k != "_totals"}
-    every = not (data or {}).get("results") and (not scanned or scanned <= {e["filename"] for e in errs})
-    crashed = any("exception" in (e.get("reason") or "") for e in errs)
-    where = shutil.which("bandit")
-    them = "them" if len(files) != 1 else "it"
-    why = (f"bandit crashed on {them}, which usually means your bandit is too old for "
-           "your Python version" + (f" (the one used: `{where}`)" if where else "")
-           + ". Install a newer one with `pipx install bandit` (the apt version can lag "
-           "far behind), or upgrade the one you have" if crashed else
-           f"bandit couldn't parse {them} (not valid Python 3, or syntax newer than "
-           "your bandit knows; upgrading bandit can help)")
-    listed = ", ".join(f"`{f}`" for f in files[:MAX_LINES_SHOWN]) + \
-        (f" +{len(files) - MAX_LINES_SHOWN} more" if len(files) > MAX_LINES_SHOWN else "")
-    if every:
-        return True, f"bandit couldn't read any of your Python files ({listed}): {why}."
-    return False, (f"{len(files)} Python file{'s' if len(files) != 1 else ''} "
-                   f"({listed}) — {why}. Findings in {them} "
-                   "are missing below, and \"since last scan\" skips your code this time.")
+    out["all"] = bool(out["other"]) and not (data or {}).get("results") and \
+        (not scanned or scanned <= {e["filename"] for e in errs})
+    return out
+
+
+def _listed(items):
+    return ", ".join(items[:MAX_LINES_SHOWN]) + \
+        (f" +{len(items) - MAX_LINES_SHOWN} more" if len(items) > MAX_LINES_SHOWN else "")
+
+
+def unread_warnings(info, patterns=()):
+    """Warning lines for bandit_unread() info. Files skipped by .plainsec
+    aren't listed (you said you don't use them). -> (lines, n invalid shown,
+    other files shown?)."""
+    keep = lambda f: not any(path_matches(f, p) for p in patterns)
+    invalid = {f: w for f, w in info["invalid"].items() if keep(f)}
+    other = [f for f in info["other"] if keep(f)]
+    lines = []
+    if invalid:
+        n = len(invalid)
+        one = n == 1
+        ver = f"{sys.version_info.major}.{sys.version_info.minor}"
+        lines.append(
+            f"{n} Python file{'' if one else 's'} {'isn' if one else 'aren'}'t valid Python: "
+            f"Python {ver} can't read {'it' if one else 'them'} either, so "
+            f"{'it' if one else 'they'} can't run as written (usually a broken or "
+            f"unfinished draft). bandit skipped {'it' if one else 'them'}: "
+            + _listed([f"`{f}` ({w})" for f, w in sorted(invalid.items())])
+            + f". Fix {'it' if one else 'them'}, delete {'it' if one else 'them'}, or "
+            "skip the folder in a `.plainsec` file.")
+    if other:
+        them = "them" if len(other) != 1 else "it"
+        where = shutil.which("bandit")
+        why = (f"bandit crashed on {them}, which usually means your bandit is too old for "
+               "your Python version" + (f" (the one used: `{where}`)" if where else "")
+               + ". Install a newer one with `pipx install bandit` (the apt version can lag "
+               "far behind), or upgrade the one you have" if info["crashed"] else
+               f"bandit couldn't parse {them}, though Python can (its syntax may be newer "
+               "than your bandit knows): upgrade bandit")
+        listed = _listed([f"`{f}`" for f in other])
+        if info["all"]:
+            lines.append(f"bandit couldn't read any of your Python files ({listed}): {why}.")
+        else:
+            lines.append(f"{len(other)} Python file{'s' if len(other) != 1 else ''} "
+                         f"({listed}) — {why}. Findings in {them} are missing below, and "
+                         "\"since last scan\" skips your code this time.")
+    return lines, len(invalid), bool(other)
 
 
 def parse_audit(data):
@@ -1227,8 +1283,11 @@ def _upgrade_secret_fp(fp):
     return "|".join([parts[0], parts[1], parts[3]]) if len(parts) == 4 else fp
 
 
-def compare(old, code, deps, code_ok, deps_ok, secrets=None, secrets_ok=False):
-    """Return a dict describing changes, or {"first": True} with no history."""
+def compare(old, code, deps, code_ok, deps_ok, secrets=None, secrets_ok=False,
+            unread_files=frozenset()):
+    """Return a dict describing changes, or {"first": True} with no history.
+    unread_files: files bandit couldn't read this time (invalid Python); their
+    old findings aren't "gone", just not looked at."""
     if not old:
         return {"first": True}
     out = {"first": False, "since": old.get("scanned_at", "?"),
@@ -1244,6 +1303,7 @@ def compare(old, code, deps, code_ok, deps_ok, secrets=None, secrets_ok=False):
         now = {f["fp"] for f in secrets or []}
         out["gone_secrets"] = sorted(before - now)
     if out["code_compared"]:
+        old = dict(old, code=[i for i in old["code"] if i.get("file") not in unread_files])
         before = Counter(item["fp"] for item in old["code"])
         now = Counter(fingerprint(f) for f in code)
         added, gone = now - before, before - now
@@ -1445,8 +1505,9 @@ def where_lines(findings):
 
 
 def headline(shown, hidden, deps, skipped=None, deps_checked=True, secrets=None,
-             unsound=0, code_checked=True):
-    """code_checked: True, False, or "partly" (bandit skipped some files)."""
+             unsound=0, code_checked=True, n_invalid=0):
+    """code_checked: True, False, or "partly" (bandit skipped some files).
+    n_invalid: files that aren't valid Python (so not checked, and can't run)."""
     urgent = sum(1 for f in shown if f["severity"] in ("HIGH", "MEDIUM"))
     high = sum(1 for f in shown if f["severity"] == "HIGH")
     low = len(shown) - urgent
@@ -1471,6 +1532,9 @@ def headline(shown, hidden, deps, skipped=None, deps_checked=True, secrets=None,
     else:
         parts += [f"{urgent} to fix first" + (f" ({high} high)" if high else ""),
                   f"{low} low-priority"]
+        if n_invalid:
+            parts.append(f"{n_invalid} invalid Python file{'s' if n_invalid != 1 else ''} "
+                         "not checked")
         if code_checked == "partly":
             parts.append("some code files NOT CHECKED")
     if hidden:
@@ -1495,7 +1559,7 @@ def display_path(path):
 def build_report(name, code, deps, errors, show_all=False, skipped=None, unused=None,
                  changes=None, hidden_ids=frozenset(), skipped_ids=frozenset(),
                  secrets=None, secrets_info=None, dep_info=None, root=None, n_copies=0,
-                 remote=None, code_partly=False):
+                 remote=None, code_partly=False, n_invalid=0):
     """secrets: None = not part of this report; "not-checked"; or a list.
     root: the scanned folder; when given, the report says paths start there.
     remote: a parse_repo_url() dict (+ commit, branch, settings) for a scan
@@ -1509,7 +1573,8 @@ def build_report(name, code, deps, errors, show_all=False, skipped=None, unused=
     n_unsound = sum(1 for n in (dep_info or {}).get("notices") or []
                     if n.get("kind") != "unmaintained")
     head = headline(shown, hidden, deps, skipped, not deps_failed, secrets, n_unsound,
-                    False if code_failed else "partly" if code_partly else True)
+                    False if code_failed else "partly" if code_partly else True,
+                    0 if code_failed else n_invalid)
     if changes:
         head += " · " + changes_headline(changes)
     out = [f"# Security report: {name}", "", f"**{head}**", ""]
@@ -2096,14 +2161,13 @@ def scan(folder, args, remote=None):
         bandit_data, err = load_json(args.bandit_json), None
     else:
         bandit_data, err = scan_code(folder)
-    code_partial = False
-    if not err:
-        failed_all, warning = bandit_unread(bandit_data, folder)
-        if failed_all:
-            err = warning
-        elif warning:
-            errors.append(warning)
-            code_partial = True      # missing findings must not read as "gone"
+    unread = bandit_unread(None if err else bandit_data, folder)
+    if unread["all"]:
+        err = unread_warnings(unread)[0][-1]
+    # Files bandit skipped although Python can read them: their findings are
+    # missing, so code history isn't compared (missing must not read as "gone").
+    # Invalid-Python files don't block history: they keep their old entries.
+    code_partial = bool(unread["other"]) and not unread["all"]
     if err:
         errors.append(f"code scan — {err}")
 
@@ -2173,14 +2237,25 @@ def scan(folder, args, remote=None):
     # History tracks notices too, so moving a package between "risky" and
     # "maintenance notice" is never reported as new or gone.
     deps_history = deps + dep_info.get("notices", [])
-    changes = compare(old, code, deps_history, code_ok, deps_ok, secrets, secrets_ok)
+    invalid_files = set(unread["invalid"])
+    changes = compare(old, code, deps_history, code_ok, deps_ok, secrets, secrets_ok,
+                      unread_files=invalid_files)
     changes["saved"] = not args.no_save
     if not args.no_save:
-        save_state(spath, snapshot(code, deps_history, code_ok, deps_ok, secrets, secrets_ok), old)
+        snap = snapshot(code, deps_history, code_ok, deps_ok, secrets, secrets_ok)
+        if snap["code"] is not None and old and old.get("code"):
+            # a file that's broken right now keeps what it had, so fixing it
+            # later doesn't show its old findings as new
+            snap["code"] += [i for i in old["code"] if i.get("file") in invalid_files]
+        save_state(spath, snap, old)
 
     skipped, unused = {}, []
+    patterns = [] if args.all else load_ignore(folder)
+    lines, n_invalid, other_shown = unread_warnings(unread, patterns)
+    if unread["all"]:        # that line is already the "code scan" error
+        lines, other_shown = lines[:-1], False
+    errors += lines
     if not args.all:
-        patterns = load_ignore(folder)
         code, skipped, unused = apply_ignore(code, patterns)
         # dependency files in skipped paths: counted, not detailed
         deps_kept, dep_skipped = [], {}
@@ -2188,7 +2263,9 @@ def scan(folder, args, remote=None):
             hit = next((p for p in patterns if path_matches(d.get("source", ""), p)), None)
             (dep_skipped.setdefault(hit, []) if hit else deps_kept).append(d)
         deps, dep_info["skipped"] = deps_kept, dep_skipped
-        unused = [p for p in unused if p not in dep_skipped]
+        unread_all = list(unread["invalid"]) + unread["other"]
+        unused = [p for p in unused if p not in dep_skipped
+                  and not any(path_matches(f, p) for f in unread_all)]
     # After history (which keeps every copy) AND after .plainsec skips: merging
     # first once let the kept copy be a skipped one, so v0.1.12 showed 57
     # skipped instead of 60 (real case). Only shown findings are merged.
@@ -2207,7 +2284,7 @@ def scan(folder, args, remote=None):
                           secrets=secrets if secrets_ok else "not-checked",
                           secrets_info=secrets_data or {}, dep_info=dep_info,
                           root=shown_root, n_copies=n_copies, remote=remote,
-                          code_partly=code_partial)
+                          code_partly=other_shown, n_invalid=n_invalid)
     print(report)
 
     if args.out:

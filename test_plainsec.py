@@ -1701,6 +1701,57 @@ class TestBanditUnread(unittest.TestCase):
         rc, out = self.run_with(found)                          # baseline was kept
         self.assertIn("0 new, 0 gone", out)
 
+    def syntax_error(self, *names):
+        scanned = {str(self.dir / n): {} for n in (*names, "good.py")}   # good.py read fine
+        return {"results": [], "metrics": dict(scanned, _totals={}), "errors": [
+            {"filename": str(self.dir / n), "reason": "syntax error while parsing AST from file"}
+            for n in names]}
+
+    def test_invalid_python_is_called_that(self):
+        # Real case (trinity_master, Nov 23): 11 skipped files were all broken
+        # drafts; "upgrading bandit can help" was the wrong advice.
+        (self.dir / "_archive").mkdir()
+        (self.dir / "_archive" / "draft.py").write_text("def f(:\n    pass\n")
+        (self.dir / "ok.py").write_text("x = 1\n")
+        bandit = self.syntax_error("_archive/draft.py", "ok.py")
+        rc, out = self.run_with(bandit)
+        ver = f"Python {plainsec.sys.version_info.major}.{plainsec.sys.version_info.minor}"
+        self.assertIn(f"1 Python file isn't valid Python: {ver} can't read it either", out)
+        self.assertIn("`_archive/draft.py` (line 1: ", out)
+        self.assertIn("1 invalid Python file not checked", out)
+        # ok.py is valid Python, so that one IS bandit's problem
+        self.assertIn("1 Python file (`ok.py`) — bandit couldn't parse it, though Python can", out)
+        self.assertIn("some code files NOT CHECKED", out)
+        self.assertNotIn("upgrading bandit can help", out)
+        # only invalid files: no NOT CHECKED in the headline
+        rc, out = self.run_with(self.syntax_error("_archive/draft.py"))
+        self.assertNotIn("NOT CHECKED", out.splitlines()[2])
+        self.assertIn("Nothing high or medium", out)
+
+    def test_plainsec_file_hides_skipped_broken_files(self):
+        (self.dir / "_archive").mkdir()
+        (self.dir / "_archive" / "draft.py").write_text("def f(:\n")
+        (self.dir / ".plainsec").write_text("_archive/\n")
+        rc, out = self.run_with(self.syntax_error("_archive/draft.py"))
+        self.assertNotIn("draft.py", out)
+        self.assertNotIn("invalid Python", out)
+        self.assertNotIn("matched nothing", out)       # the pattern did match something
+
+    def test_broken_file_keeps_its_history(self):
+        p = self.dir / "app.py"
+        p.write_text("import random\nx = 1\ny = random.random()\n")
+        found = {"results": [{"filename": str(p), "line_number": 3, "issue_severity": "LOW",
+                              "test_id": "B311", "code": "3 y = random.random()\n"}],
+                 "errors": [], "metrics": {}}
+        self.run_with(found)                                    # baseline: 1 finding
+        p.write_text("import random\nx = (\ny = random.random()\n")   # edit breaks it
+        rc, out = self.run_with(self.syntax_error("app.py"))
+        self.assertIn("0 new, 0 gone", out)                    # compared, not "gone"
+        self.assertNotIn("Gone since last time", out)
+        p.write_text("import random\nx = 1\ny = random.random()\n")   # fixed again
+        rc, out = self.run_with(found)
+        self.assertIn("0 new, 0 gone", out)                    # not "new" either
+
 
 if __name__ == "__main__":
     unittest.main()
