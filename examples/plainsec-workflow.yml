@@ -1,0 +1,57 @@
+# plainsec on every push, for YOUR repository.
+# Copy this file to .github/workflows/plainsec.yml in your repo; nothing else is needed.
+# The report appears on each run's summary page and as a downloadable file
+# (plainsec-report). It never fails your build: the report is information.
+name: plainsec
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # full history, so gitleaks can check old commits
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install plainsec and the scanners
+        env:
+          GH_TOKEN: ${{ github.token }}   # only to look up gitleaks' latest version
+        run: |
+          # plainsec itself, plus bandit (Python code) and pip-audit (fallback).
+          # To pin a version, add @<commit> to the URL.
+          pip install "git+https://github.com/Dagrinder742/plainsec" bandit pip-audit
+          # gitleaks: official release, checksum-verified
+          GL_VER=$(curl -sSfL -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/repos/gitleaks/gitleaks/releases/latest | python -c "import json,sys; print(json.load(sys.stdin)['tag_name'].lstrip('v'))")
+          curl -sSfLO "https://github.com/gitleaks/gitleaks/releases/download/v${GL_VER}/gitleaks_${GL_VER}_linux_x64.tar.gz"
+          curl -sSfLO "https://github.com/gitleaks/gitleaks/releases/download/v${GL_VER}/gitleaks_${GL_VER}_checksums.txt"
+          sha256sum --check --ignore-missing "gitleaks_${GL_VER}_checksums.txt"
+          tar -xzf "gitleaks_${GL_VER}_linux_x64.tar.gz" gitleaks && sudo mv gitleaks /usr/local/bin/
+          # osv-scanner: official release, checksum-verified
+          curl -sSfLO https://github.com/google/osv-scanner/releases/latest/download/osv-scanner_linux_amd64
+          curl -sSfLO https://github.com/google/osv-scanner/releases/latest/download/osv-scanner_SHA256SUMS
+          sha256sum --check --ignore-missing osv-scanner_SHA256SUMS
+          chmod +x osv-scanner_linux_amd64 && sudo mv osv-scanner_linux_amd64 /usr/local/bin/osv-scanner
+          rm -f gitleaks_* osv-scanner_SHA256SUMS
+          gitleaks version; osv-scanner --version | head -1
+
+      - name: plainsec report
+        run: |
+          # plainsec exits 1 when it finds anything; `|| true` keeps that from failing
+          # the build. --no-save: CI has no earlier scan to compare with.
+          plainsec . --out report.md --no-save || true
+          cat report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plainsec-report
+          path: report.md
