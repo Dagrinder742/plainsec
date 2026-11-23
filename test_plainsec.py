@@ -2014,6 +2014,40 @@ class TestNpmAdvice(unittest.TestCase):
                              {"express", "grunt", "fsevents", "react"})
             self.assertIsNone(plainsec.npm_direct_deps(tmp, "other/package-lock.json"))
 
+
+class TestGoSnapshotFixes(unittest.TestCase):
+    """Real case (Nov 23, go-test-bench go.sum, commands run with go 1.26.8).
+    x/crypto: fix_to 0.58.1-0.20261009181718-2f1f834330b2 printed "Fixed in:
+    0.58.1 or later" (`go get golang.org/x/crypto@v0.58.1`: "unknown revision";
+    the releases are v0.58.0, v0.59.0) and `go get …@v0.58.1-0.2026…`.
+    yaml.v3: `go get gopkg.in/yaml.v3@v3.0.0-20220521103104-8f96da9f5d5e`
+    DOWNGRADED it from v3.0.1 once gin's update had pulled that in."""
+
+    def test_unreleased_commit_after_a_release(self):
+        v = "0.58.1-0.20261009181718-2f1f834330b2"
+        text = plainsec.fix_text(v, "Go")
+        self.assertIn("the first release after 0.58.0", text)
+        self.assertNotIn("0.58.1 or later", text)
+        d = {"name": "golang.org/x/crypto", "version": "0.0.0-20201216223049-8b5274cf687f",
+             "fix_to": v, "ecosystem": "Go", "source": "go.sum"}
+        how = plainsec.dep_how(d, root=Path.home() / "go-test-bench")
+        self.assertIn("`cd ~/go-test-bench && go get golang.org/x/crypto@latest`", how)
+        self.assertIn("newer than v0.58.0", how)
+
+    def test_commit_before_the_first_tag_uses_the_tag(self):
+        v = "3.0.0-20220521103104-8f96da9f5d5e"
+        d = {"name": "gopkg.in/yaml.v3", "version": "3.0.0-20210107192922-496545a6307b",
+             "fix_to": v, "ecosystem": "Go", "source": "go.sum"}
+        how = plainsec.dep_how(d, root=Path.home() / "go-test-bench")
+        self.assertIn("`cd ~/go-test-bench && go get gopkg.in/yaml.v3@v3.0.0`", how)
+        self.assertNotIn("20220521103104", how)
+
+    def test_normal_versions_and_other_ecosystems_unchanged(self):
+        d = {"name": "github.com/gin-gonic/gin", "version": "1.7.4", "fix_to": "1.9.1",
+             "ecosystem": "Go", "source": "go.mod"}
+        self.assertIn("go get github.com/gin-gonic/gin@v1.9.1`", plainsec.dep_how(d, root=Path.home() / "g"))
+        self.assertEqual(plainsec.fix_text("1.0.0-alpha.1"), "1.0.0 or later (first fixed in pre-release 1.0.0-alpha.1)")
+
 class TestRenderDepsNotes(unittest.TestCase):
     """The cargo notes are one if/elif; the NO SCORE note is its own if.
     v0.1.18 put the NO SCORE `if` between them, so `elif cargo_missing` hung

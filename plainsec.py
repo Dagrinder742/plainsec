@@ -520,7 +520,28 @@ def stable_of(v):
     return re.split(r"[-+]|(?<=\d)(?=[A-Za-z])", str(v), maxsplit=1)[0]
 
 
-def fix_text(v):
+# Go "pseudo-versions" name an untagged commit. Real case (go-test-bench,
+# x/crypto fix 0.58.1-0.20261009181718-2f1f834330b2): "0.58.1 or later" named a
+# version that doesn't exist (go get: "unknown revision v0.58.1").
+#   X.Y.Z-0.<date>-<commit>: a commit after release X.Y.(Z-1)
+#   X.Y.Z-<date>-<commit>:   a commit from before X.Y.Z was tagged
+_GO_PSEUDO = re.compile(r"^(\d+)\.(\d+)\.(\d+)-(0\.)?(\d{14})-([0-9a-f]{12})$")
+
+
+def go_after_release(v):
+    """'0.58.1-0.20261009181718-2f1f…' -> '0.58.0' (the release the fix comes
+    after); None for any other version."""
+    m = _GO_PSEUDO.match(str(v))
+    if not m or not m.group(4) or int(m.group(3)) == 0:
+        return None
+    return f"{m.group(1)}.{m.group(2)}.{int(m.group(3)) - 1}"
+
+
+def fix_text(v, eco=None):
+    after = go_after_release(v) if eco == "Go" else None
+    if after:
+        return (f"the first release after {after} (the fix is an unreleased commit, "
+                f"{str(v).rsplit('-', 1)[-1]})")
     if is_prerelease(v):
         return f"{stable_of(v)} or later (first fixed in pre-release {v})"
     return f"{v} or later"
@@ -730,6 +751,13 @@ def _dep_how(d, root=None):
                     "update those packages (the names right under your project)")
         return f"{where}`{cd or ''}npm install {name}@{to}`"
     if eco == "Go":
+        after = go_after_release(to)
+        if after:
+            return (f"{where}`{cd or ''}go get {name}@latest`, then check the version it "
+                    f"prints is newer than v{after}")
+        if _GO_PSEUDO.match(str(to)):
+            # real case (yaml.v3): the snapshot DOWNGRADED v3.0.1; the tag doesn't
+            return f"{where}`{cd or ''}go get {name}@v{stable_of(to)}`"
         return f"{where}`{cd or ''}go get {name}@v{to}`"
     return f"upgrade `{name}` to {to} or later"
 
@@ -1928,7 +1956,7 @@ def render_deps(deps, failed, info, root=None):
                  f"({', '.join(d['ids'][:4])}{', …' if n > 4 else ''})"]
         lines += what_it_means(d)
         if d.get("fix_to"):
-            lines.append(f"  - Fixed in: {fix_text(d['fix_to'])}"
+            lines.append(f"  - Fixed in: {fix_text(d['fix_to'], d.get('ecosystem'))}"
                          + (f" (no fix yet for {', '.join(d['no_fix'])})" if d.get("no_fix") else ""))
         lines.append(f"  - How: {dep_how(d, root, grouped)}")
         return lines
@@ -1962,7 +1990,7 @@ def render_deps(deps, failed, info, root=None):
             lines = [f"- **{d['name']} {d['version']}**{kind} (`{d['source']}`): "
                      f"{d['summary'] or d['ids'][0]}"]
             if d.get("fix_to"):
-                lines.append(f"  - Fixed in: {fix_text(d['fix_to'])}")
+                lines.append(f"  - Fixed in: {fix_text(d['fix_to'], d.get('ecosystem'))}")
             lines.append(f"  - How: {dep_how(d, root, grouped)}")
             return lines
         tests = [d for d in unsound if d.get("ships") is False]
