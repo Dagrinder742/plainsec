@@ -76,7 +76,8 @@ plainsec https://github.com/owner/repo    # scan a repository without keeping a 
 On Termux, or inside a virtual environment, use `pip install git+https://github.com/Dagrinder742/plainsec`
 instead. (On Ubuntu 23.04+ and Debian 12+, a plain `pip install` outside a venv is refused
 on purpose; pipx gives plainsec its own environment.) To update later: `pipx upgrade
-plainsec`, or the same `pip install` with `--upgrade`.
+plainsec`, or the same `pip install` with `--upgrade`. To install a fixed version, add its
+tag to the URL: `git+https://github.com/Dagrinder742/plainsec@v0.2.4`.
 
 No other Python packages are needed; plainsec itself is a single standard-library file.
 The scanners in the table above are installed separately.

@@ -28,7 +28,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}   # only to look up gitleaks' latest version
         run: |
           # plainsec itself, plus bandit (Python code) and pip-audit (fallback).
-          # To pin a version, add @<commit> to the URL.
+          # To pin a version, add a tag to the URL: .../plainsec@v0.2.4
           pip install "git+https://github.com/Dagrinder742/plainsec" bandit pip-audit
           # gitleaks: official release, checksum-verified
           GL_VER=$(curl -sSfL -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/repos/gitleaks/gitleaks/releases/latest | python -c "import json,sys; print(json.load(sys.stdin)['tag_name'].lstrip('v'))")
