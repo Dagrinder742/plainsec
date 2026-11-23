@@ -1729,6 +1729,11 @@ def render_secrets(secrets, info, root=None):
     out.append(f"Scanned: {where}. Secrets are never printed here.")
     if not secrets:
         return out + ["No secrets found.", ""]
+    if info.get("history"):
+        # Real case (test_keys): the AWS key was at `keys` line 4 in fbc14303;
+        # today's `keys` has an empty line 4. The number belongs to that commit.
+        out.append("Line numbers are from the commit named for each place; the file may "
+                   "have changed since, so today's version can show something else there.")
     by_rule = {}
     for f in secrets:
         by_rule.setdefault(f["id"], []).append(f)

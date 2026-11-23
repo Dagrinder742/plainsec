@@ -697,6 +697,16 @@ class TestSecrets(unittest.TestCase):
         self.assertIn("an ID", plainsec.name_hint('secret_id = "REDACTED"'))
         self.assertEqual(plainsec.name_hint('author: "REDACTED"'), "")      # not `auth`
 
+    def test_history_says_line_numbers_are_from_that_commit(self):
+        # Real case (Nov 23, test_keys): the AWS key was reported at `keys` line 4,
+        # first committed in fbc14303. Today's `keys` starts with something else
+        # and line 4 is empty; nothing said the line number belongs to that commit.
+        l = leak("aws-access-token", "keys", 4, "fbc14303ff", "2022-06-16T00:00:00Z")
+        _, out = self.run_with([l])
+        self.assertIn("Line numbers are from the commit named for each place", out)
+        _, out = self.run_with([])                      # nothing found: no note
+        self.assertNotIn("Line numbers are from the commit", out)
+
     def test_name_hint_never_uses_the_value(self):
         # a hash-looking VALUE must not earn the "usually fine" hash note
         self.assertNotIn("hash", plainsec.name_hint('token = "sha256_looking_value"'))
