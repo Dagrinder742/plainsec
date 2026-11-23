@@ -1874,5 +1874,31 @@ class TestBanditUnread(unittest.TestCase):
         self.assertIn("0 new, 0 gone", out)                    # not "new" either
 
 
+
+class TestRenderDepsNotes(unittest.TestCase):
+    """The cargo notes are one if/elif; the NO SCORE note is its own if.
+    v0.1.18 put the NO SCORE `if` between them, so `elif cargo_missing` hung
+    on it and the install-cargo advice vanished whenever an advisory had no score."""
+
+    DEP = {"name": "borsh", "version": "0.10.4", "ecosystem": "crates.io",
+           "source": "app/Cargo.lock", "severity": "NO SCORE", "ids": ["GHSA-fjx5-qpf4-xjf2"],
+           "summary": "Parsing borsh messages with ZST which are not-copy/clone is unsound",
+           "fix_to": "1.0.0", "direct": True}
+
+    def render(self, info):
+        return "\n".join(plainsec.render_deps([dict(self.DEP)], False, info))
+
+    def test_no_score_and_cargo_missing_both_shown(self):
+        out = self.render({"tool": "osv-scanner", "cargo_missing": True})
+        self.assertIn("Install Rust's `cargo`", out)
+        self.assertIn("doesn't mean harmless", out)
+
+    def test_cargo_checked_still_wins_over_missing(self):
+        out = self.render({"tool": "osv-scanner", "cargo_checked": True, "cargo_missing": True})
+        self.assertIn("checked with `cargo tree`", out)
+        self.assertNotIn("Install Rust's `cargo`", out)
+        self.assertIn("doesn't mean harmless", out)
+
+
 if __name__ == "__main__":
     unittest.main()

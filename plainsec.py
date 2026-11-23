@@ -1835,6 +1835,12 @@ def render_deps(deps, failed, info, root=None):
     if info.get("cargo_checked"):
         out.append("Rust crates were checked with `cargo tree`, so crates used only by "
                    "tests are listed separately.")
+    elif info.get("cargo_missing"):
+        # Belongs to cargo_checked. v0.1.18 inserted the NO SCORE note between the two,
+        # which hung this elif on it: a report with any unscored advisory never said
+        # to install cargo.
+        out.append("Install Rust's `cargo` (or fix `cargo tree` in that folder) to tell "
+                   "test-only crates apart from ones that ship in your program.")
     every = deps + [n for n in info.get("notices") or [] if n.get("kind") != "unmaintained"]
     if any(d.get("via") for d in every):
         out.append("When a crate comes in through another one, updating that one is the "
@@ -1843,9 +1849,6 @@ def render_deps(deps, failed, info, root=None):
     if any(d.get("severity") == "NO SCORE" for d in deps):
         out.append("\"No severity score\" means the advisory wasn't given a rating. It "
                    "doesn't mean harmless: read what it means and decide.")
-    elif info.get("cargo_missing"):
-        out.append("Install Rust's `cargo` (or fix `cargo tree` in that folder) to tell "
-                   "test-only crates apart from ones that ship in your program.")
     if not deps:
         out.append("No known vulnerabilities in your dependencies.")
     by_src = {}
