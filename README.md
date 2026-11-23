@@ -60,9 +60,27 @@ NOT CHECKED, never as an all-clear.**
 pip install git+https://github.com/Dagrinder742/plainsec
 plainsec ~/my-project
 plainsec ~/my-project --out report.md     # also save the report as Markdown
+plainsec https://github.com/owner/repo    # scan a repository without keeping a copy
 ```
 
 No other Python packages are needed; plainsec itself is a single standard-library file.
+
+### Scanning a repository by its address
+
+Give plainsec an `https://` or SSH (`git@github.com:owner/repo`) address and it downloads
+the repository with its full history (so old commits are checked for secrets too) into a
+temporary folder, scans it, and deletes the copy. A link copied from your browser works,
+including `/tree/<branch>` links. Private repositories work when your git can already log
+in (an SSH key, or a saved login); plainsec never asks for a password.
+
+- "Since last scan" follows the address, so `https://` and `git@` addresses of the same
+  repository share one history.
+- Commands in the report point at your own copy (`~/<repo>`) and say how to get one; on
+  GitHub the report also links to the scanned commit.
+- A downloaded repository is treated as someone else's code: symlinks are checked out as
+  plain files, and the repository's own scanner settings (`bandit.yaml`,
+  `.gitleaks.toml`, `osv-scanner.toml`, `.plainsec`) are named in the report, because they
+  can switch checks off.
 
 Useful options:
 
@@ -85,6 +103,9 @@ Useful options:
   update the crate that pulls it in.
 - **"Since last scan":** what's new and what's gone. Moving code around, rewriting git
   history, or adding an ignore line doesn't count as a change.
+- **Scanning never runs the project's code.** `cargo` is started from your home folder
+  with `--manifest-path`, so a project's `.cargo/config.toml` (which can name a program to
+  run) and `rust-toolchain.toml` are never read, for downloaded and local folders alike.
 - **Never a false all-clear:** a scanner that's missing, fails, or quietly finds nothing
   where dependency files clearly exist is reported as NOT CHECKED.
 
@@ -118,6 +139,8 @@ same.
   each dependency file directly.
 - "Since last scan" identifies a code finding by the text of the flagged line, so editing
   that line shows up as one gone and one new.
+- An old bandit can crash on newer Python (Ubuntu's apt bandit 1.7.10 does on Python 3.14).
+  plainsec then says which files weren't checked; `pipx install bandit` gets a current one.
 
 ## License
 

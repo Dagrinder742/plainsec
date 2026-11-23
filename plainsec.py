@@ -15,6 +15,7 @@ Usage:
     python plainsec.py ~/my-project --out report.md   # also save the report
     python plainsec.py ~/my-project --all          # include skipped / test-file findings
     python plainsec.py ~/my-project --no-save      # don't update "since last scan"
+    python plainsec.py https://github.com/owner/repo   # download, scan, delete
 
 Skipping old drafts or copies: put a `.plainsec` file in the project folder,
 one path per line (folders end with /, # starts a comment), e.g.
@@ -37,6 +38,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 import sys
@@ -545,6 +547,19 @@ def cargo_direct_deps(root, source):
     return {n.replace("_", "-").lower() for n in names}
 
 
+def _cargo_where(folder):
+    """(extra args, cwd) for a cargo call about the Cargo.lock in folder.
+    cargo reads `.cargo/config.toml` (which can name a program to run as
+    rustc) and rustup reads `rust-toolchain.toml` from the folder it's started
+    in, so scanning a stranger's repo could run its code (VERIFIED Nov 23: a
+    rustc-wrapper script ran). Started from your home folder with
+    --manifest-path, neither file in the project is read. Every scan works
+    this way, downloaded or not: a cloned repo is just as untrusted. Cost: a
+    project's own cargo settings are ignored too; if cargo fails because of
+    that, the report only loses its test-only labels."""
+    return ["--manifest-path", str(Path(folder).resolve() / "Cargo.toml")], Path.home()
+
+
 def cargo_shipping(root, source):
     """Set of (name, version) that are built WITHOUT dev-dependencies, from
     `cargo tree -e no-dev` run next to the Cargo.lock. None if cargo is missing
@@ -552,10 +567,11 @@ def cargo_shipping(root, source):
     if shutil.which("cargo") is None:
         return None
     folder = (Path(root) / source).parent if root else Path(source).parent
+    extra, cwd = _cargo_where(folder)
     cmd = ["cargo", "tree", "-e", "no-dev", "--target", "all", "--prefix", "none",
-           "--format", "{p}", "--locked"]
+           "--format", "{p}", "--locked"] + extra
     try:
-        proc = subprocess.run(cmd, cwd=folder, capture_output=True, text=True,
+        proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
                               timeout=180)  # list form, no shell
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -585,8 +601,10 @@ def cargo_via(root, source, name, version, direct, ships=None):
         # crate (`-i -e no-dev borsh@…`), cargo failed, and the two crates
         # that ship got the old advice
         cmd += ["-e", "no-dev"]
+    extra, cwd = _cargo_where(folder)
+    cmd += extra
     try:
-        proc = subprocess.run(cmd, cwd=folder, capture_output=True, text=True,
+        proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
                               timeout=120)  # list form, no shell
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -828,6 +846,42 @@ def parse_bandit(data, root=None):
     findings.sort(key=lambda f: (SEVERITY_ORDER.get(f["severity"], 9),
                                  f["file"], f["line"]))
     return findings
+
+
+def bandit_unread(data, root=None):
+    """Files bandit skipped because it couldn't read them. -> (every file
+    failed?, warning text or None). Real case (Nov 23): Ubuntu's apt bandit
+    1.7.10 on Python 3.14 crashed on every file ("exception while scanning
+    file") and the report said "0 low-priority", an all-clear about nothing."""
+    errs = [e for e in (data or {}).get("errors") or [] if e.get("filename")]
+    if not errs:
+        return False, None
+    def rel(p):
+        if root:
+            try:
+                return Path(p).resolve().relative_to(Path(root).resolve()).as_posix()
+            except ValueError:
+                pass
+        return p
+    files = sorted({rel(e["filename"]) for e in errs})
+    scanned = {k for k in ((data or {}).get("metrics") or {}) if k != "_totals"}
+    every = not (data or {}).get("results") and (not scanned or scanned <= {e["filename"] for e in errs})
+    crashed = any("exception" in (e.get("reason") or "") for e in errs)
+    where = shutil.which("bandit")
+    them = "them" if len(files) != 1 else "it"
+    why = (f"bandit crashed on {them}, which usually means your bandit is too old for "
+           "your Python version" + (f" (the one used: `{where}`)" if where else "")
+           + ". Install a newer one with `pipx install bandit` (the apt version can lag "
+           "far behind), or upgrade the one you have" if crashed else
+           f"bandit couldn't parse {them} (not valid Python 3, or syntax newer than "
+           "your bandit knows; upgrading bandit can help)")
+    listed = ", ".join(f"`{f}`" for f in files[:MAX_LINES_SHOWN]) + \
+        (f" +{len(files) - MAX_LINES_SHOWN} more" if len(files) > MAX_LINES_SHOWN else "")
+    if every:
+        return True, f"bandit couldn't read any of your Python files ({listed}): {why}."
+    return False, (f"{len(files)} Python file{'s' if len(files) != 1 else ''} "
+                   f"({listed}) — {why}. Findings in {them} "
+                   "are missing below, and \"since last scan\" skips your code this time.")
 
 
 def parse_audit(data):
@@ -1101,14 +1155,18 @@ STATE_VERSION = 1
 MAX_CHANGES_SHOWN = 15
 
 
-def state_path(folder):
+def state_path(folder, key=None):
+    """key: a repo URL's state_key(). A URL scan uses a new temp folder every
+    time, so the folder can't be the identity there."""
     base = os.environ.get("PLAINSEC_STATE_DIR") or os.path.join(
         os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"),
         "plainsec")
-    resolved = str(Path(folder).resolve())
+    resolved = key or str(Path(folder).resolve())
+    name = (re.sub(r"[^A-Za-z0-9._-]", "_", key.rsplit("/", 1)[-1].replace("#", "-"))
+            if key else Path(resolved).name) or "root"
     # Only names a file, not security; saying so keeps bandit (B324) quiet honestly.
     tag = hashlib.sha1(resolved.encode("utf-8"), usedforsecurity=False).hexdigest()[:10]
-    return Path(base) / f"{Path(resolved).name or 'root'}-{tag}.json"
+    return Path(base) / f"{name}-{tag}.json"
 
 
 def fingerprint(f):
@@ -1226,9 +1284,9 @@ def render_changes(ch, hidden_ids, skipped_ids):
     out = ["## Since last scan"]
     if ch["first"]:
         if not ch.get("saved", True):
-            return out + ["No earlier scan of this folder to compare with, and this "
+            return out + ["No earlier scan of this project to compare with, and this "
                           "run used --no-save, so nothing was saved for next time.", ""]
-        return out + ["First scan of this folder. Saved as the starting point; "
+        return out + ["First scan of this project. Saved as the starting point; "
                       "the next scan will show what changed.", ""]
     out.append(f"Compared with the scan from {ch['since'].replace('T', ' ')}.")
     names = {"code": "Code", "deps": "Dependencies", "secrets": "Secrets"}
@@ -1387,7 +1445,8 @@ def where_lines(findings):
 
 
 def headline(shown, hidden, deps, skipped=None, deps_checked=True, secrets=None,
-             unsound=0):
+             unsound=0, code_checked=True):
+    """code_checked: True, False, or "partly" (bandit skipped some files)."""
     urgent = sum(1 for f in shown if f["severity"] in ("HIGH", "MEDIUM"))
     high = sum(1 for f in shown if f["severity"] == "HIGH")
     low = len(shown) - urgent
@@ -1406,9 +1465,14 @@ def headline(shown, hidden, deps, skipped=None, deps_checked=True, secrets=None,
             likely = sum(1 for f in secrets if f.get("hint") and f["hint"] != KEY_ID_HINT)
             parts.append(f"{len(secrets)} possible secret{'s' if len(secrets) != 1 else ''}"
                          + (f" ({likely} named like IDs/hashes)" if likely else ""))
-    parts += [dep_part,
-             f"{urgent} to fix first" + (f" ({high} high)" if high else ""),
-             f"{low} low-priority"]
+    parts.append(dep_part)
+    if code_checked is False:
+        parts.append("code NOT CHECKED")
+    else:
+        parts += [f"{urgent} to fix first" + (f" ({high} high)" if high else ""),
+                  f"{low} low-priority"]
+        if code_checked == "partly":
+            parts.append("some code files NOT CHECKED")
     if hidden:
         parts.append(f"{len(hidden)} normal-in-tests hidden")
     if skipped:
@@ -1430,9 +1494,12 @@ def display_path(path):
 
 def build_report(name, code, deps, errors, show_all=False, skipped=None, unused=None,
                  changes=None, hidden_ids=frozenset(), skipped_ids=frozenset(),
-                 secrets=None, secrets_info=None, dep_info=None, root=None, n_copies=0):
+                 secrets=None, secrets_info=None, dep_info=None, root=None, n_copies=0,
+                 remote=None, code_partly=False):
     """secrets: None = not part of this report; "not-checked"; or a list.
-    root: the scanned folder; when given, the report says paths start there."""
+    root: the scanned folder; when given, the report says paths start there.
+    remote: a parse_repo_url() dict (+ commit, branch, settings) for a scan
+    by address; root is then where the reader's own copy is expected."""
     deps_failed = any(e.startswith("dependency scan") for e in errors)
     code_failed = any(e.startswith("code scan") for e in errors)
     shown, hidden = split_findings(code, show_all)
@@ -1441,11 +1508,14 @@ def build_report(name, code, deps, errors, show_all=False, skipped=None, unused=
 
     n_unsound = sum(1 for n in (dep_info or {}).get("notices") or []
                     if n.get("kind") != "unmaintained")
-    head = headline(shown, hidden, deps, skipped, not deps_failed, secrets, n_unsound)
+    head = headline(shown, hidden, deps, skipped, not deps_failed, secrets, n_unsound,
+                    False if code_failed else "partly" if code_partly else True)
     if changes:
         head += " · " + changes_headline(changes)
     out = [f"# Security report: {name}", "", f"**{head}**", ""]
-    if root is not None:
+    if remote:
+        out += remote_intro(remote, root)
+    elif root is not None:
         out += [f"File paths below start from `{display_path(root)}`. To open one, "
                 f"first run `cd {shell_path(root)}`.", ""]
     if n_copies:
@@ -1513,6 +1583,31 @@ def build_report(name, code, deps, errors, show_all=False, skipped=None, unused=
             out.append(f"- `{pat}` — matched nothing. Typo, or the path moved?")
         out.append("")
     return "\n".join(out)
+
+
+def remote_intro(remote, root):
+    """The scanned copy is gone when the report is read, so every printed
+    command points at the reader's own copy, and says how to get one."""
+    what = ", ".join(x for x in (f"branch `{remote['branch']}`" if remote.get("branch") else "",
+                                 f"commit `{remote['commit'][:12]}`" if remote.get("commit") else "")
+                     if x)
+    branch = f"--branch {remote['ref']} " if remote.get("ref") else ""
+    out = [f"Scanned `{remote['shown']}`" + (f" ({what})" if what else "")
+           + " from a temporary copy that was deleted after the scan. File paths below "
+           "start from the top of the repository.",
+           "",
+           f"Commands below expect your own copy at `{display_path(root)}`. If you don't "
+           f"have one: `git clone {branch}{remote['shown']} {shell_path(root)}`. "
+           "If yours is somewhere else, change that part of the command.", ""]
+    if remote.get("web") and remote.get("commit"):
+        out += [f"To look at a file in your browser instead: "
+                f"{remote['web']}/blob/{remote['commit'][:12]}/ followed by its path.", ""]
+    if remote.get("settings"):
+        out += ["This repository has its own scanner settings ("
+                + ", ".join(f"`{s}`" for s in remote["settings"])
+                + "), and they were used. Settings can switch checks off: fine in your "
+                "own repository, but in one you don't trust, read them first.", ""]
+    return out
 
 
 def render_secrets(secrets, info, root=None):
@@ -1740,9 +1835,212 @@ def load_json(path):
         return json.load(fh)
 
 
+# ---------------------------------------------------------------------------
+# Scanning a repository by its address (downloaded to a temp folder, deleted after)
+# ---------------------------------------------------------------------------
+_NO_SCHEME_HOSTS = ("github.com/", "gitlab.com/", "codeberg.org/", "bitbucket.org/")
+_HOST = r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?"
+_REPO_PATH = r"[A-Za-z0-9._~-]+(?:/[A-Za-z0-9._~-]+)*"
+
+
+def looks_like_url(text):
+    return "://" in text or "::" in text or bool(re.match(rf"^[\w.-]+@{_HOST}:", text)) or \
+        text.lower().startswith(_NO_SCHEME_HOSTS)
+
+
+def parse_repo_url(text):
+    """A repo address → {"url": what git clones, "shown": the address without
+    any login in it, "key": identity for "since last scan", "name": folder
+    name, "ref": branch/tag from a /tree/ link or None, "web": GitHub page or
+    None}. None if it isn't an https:// or ssh address plainsec accepts.
+    Only https and ssh: git also takes ext:: and file:// addresses, which
+    can run commands or read local files."""
+    t = text.strip()
+    if t.lower().startswith(_NO_SCHEME_HOSTS):
+        t = "https://" + t
+    m = re.match(rf"^https://([^@/\s]+@)?({_HOST})(:\d+)?/({_REPO_PATH})/*$", t)
+    login = ""
+    if m:
+        login, host, port, path = m.group(1) or "", m.group(2).lower(), m.group(3) or "", m.group(4)
+        login_free = f"https://{host}{port}/"
+    else:
+        m = (re.match(rf"^ssh://([\w.-]+@)?({_HOST})(:\d+)?/({_REPO_PATH})/*$", t) or
+             re.match(rf"^()([\w.-]+@{_HOST}):({_REPO_PATH})/*$", t))
+        if not m:
+            return None
+        if t.startswith("ssh://"):
+            user, host, port, path = m.group(1) or "", m.group(2).lower(), m.group(3) or "", m.group(4)
+            login_free = f"ssh://{user}{host}{port}/"
+        else:                                   # git@github.com:owner/repo
+            user_host, path = m.group(2), m.group(3)
+            host, port = user_host.split("@", 1)[1].lower(), ""
+            login_free = f"{user_host}:"
+    parts = path.split("/")
+    ref, web = None, None
+    if "-" in parts:                            # GitLab: group/repo/-/tree/main
+        i = parts.index("-")
+        if parts[i + 1:i + 2] == ["tree"] and len(parts) > i + 2:
+            ref = "/".join(parts[i + 2:])
+        parts = parts[:i]
+    if host == "github.com":
+        if len(parts) < 2:
+            return None
+        if len(parts) > 3 and parts[2] == "tree":
+            ref = "/".join(parts[3:])
+        parts = parts[:2]
+    if any(p in (".", "..") for p in parts):
+        return None
+    clone_path = "/".join(parts)                # as given (some servers need the .git)
+    if parts and parts[-1].endswith(".git"):
+        parts[-1] = parts[-1][:-4]
+    if not parts or not parts[-1]:
+        return None
+    repo = "/".join(parts)
+    if host == "github.com":
+        web = f"https://github.com/{repo}"
+    shown = login_free + repo
+    url = (login_free.replace("https://", "https://" + login, 1) if login else login_free) + clone_path
+    # https and ssh addresses of the same repo share their scan history
+    base_key = f"{host}/{repo.lower() if host == 'github.com' else repo}"
+    name = re.sub(r"[^A-Za-z0-9._-]", "_", parts[-1]).lstrip(".") or "repo"
+    info = {"url": url, "shown": shown, "base_key": base_key, "name": name, "web": web}
+    set_ref(info, ref)
+    return info
+
+
+def set_ref(info, ref):
+    info["ref"] = ref
+    info["key"] = info["base_key"] + (f"#{ref}" if ref else "")
+
+
+def _git_env():
+    # no password prompt (a typo'd GitHub address asks for one and waits),
+    # no Git LFS downloads (big files, not needed for the scan)
+    return dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_LFS_SKIP_SMUDGE="1")
+
+
+GIT_ERRORS = (   # (git's words, plain English); real messages, checked Nov 23
+    ("host key verification failed",
+     "this device's SSH doesn't know that server yet. Use the https:// address, or run "
+     "`ssh -T git@github.com` once and answer yes"),
+    ("permission denied (publickey)",
+     "the server didn't accept your SSH key (none set up here, or not added to your account)"),
+    ("repository not found",
+     "the repository doesn't exist, or it's private (GitHub answers the same for both)"),
+    ("could not read username",
+     "the server wants a login, so the repository is probably private"),
+    ("authentication failed", "your login was refused"),
+    ("remote branch", "there's no branch or tag with that name"),
+    ("could not resolve host", "no internet connection, or the server name is misspelled"),
+)
+
+
+def _git_error(proc, info):
+    """git's message up to its first fatal: line (the last line was useless in a
+    real case: "and the repository exists."), led by a plain-English reason."""
+    lines = [l.strip() for l in (proc.stderr or proc.stdout or "").splitlines() if l.strip()]
+    kept = []
+    for l in lines:
+        kept.append(l)
+        if l.lower().startswith("fatal:"):
+            break
+    msg = " ".join(kept) or "git failed"
+    plain = next((p for k, p in GIT_ERRORS if k in msg.lower()), None)
+    msg = f"{plain} (git said: {msg})" if plain else msg
+    return msg.replace(info["url"], info["shown"])          # never print a login
+
+
+def resolve_ref(info):
+    """A /tree/ link can go on into folders (tree/main/src/app), and branch
+    names can have slashes too (tree/feature/x). The longest start of it that
+    is a real branch or tag wins. -> (ref, folder part or "", error)."""
+    ref = info["ref"]
+    if not ref or "/" not in ref:
+        return ref, "", None
+    proc = subprocess.run(["git", "ls-remote", "--heads", "--tags", "--", info["url"]],
+                          capture_output=True, text=True, env=_git_env(),
+                          timeout=120)  # list form, no shell
+    if proc.returncode != 0:
+        return None, "", _git_error(proc, info)
+    names = {l.split("\t", 1)[1].split("/", 2)[2].removesuffix("^{}")
+             for l in proc.stdout.splitlines() if "\t" in l and l.count("/") >= 2}
+    parts = ref.split("/")
+    for n in range(len(parts), 0, -1):
+        if "/".join(parts[:n]) in names:
+            return "/".join(parts[:n]), "/".join(parts[n:]), None
+    return ref, "", None                        # let clone say it's not found
+
+
+def clone_repo(info, dest):
+    """Full clone (gitleaks needs every commit) of info["url"] into dest.
+    Symlinks are checked out as plain files, so a link in the repo can't make
+    the scanners read files outside it. -> (commit, branch, error)."""
+    if shutil.which("git") is None:
+        return None, None, "git is not installed (Ubuntu/Debian: `sudo apt install git`)"
+    try:
+        ref, folder, err = resolve_ref(info)
+        if err:
+            return None, None, err
+        if folder:
+            print(f"Note: scanning the whole repository, not just `{folder}`.", file=sys.stderr)
+            set_ref(info, ref)       # history and the printed clone command use the branch
+        cmd = ["git", "clone", "--quiet", "--config", "core.symlinks=false"]
+        if ref:
+            cmd += ["--branch", ref]
+        cmd += ["--", info["url"], str(dest)]
+        proc = subprocess.run(cmd, capture_output=True, text=True, env=_git_env())  # list form, no shell
+        if proc.returncode != 0:
+            return None, None, _git_error(proc, info)
+        commit = subprocess.run(["git", "-C", str(dest), "rev-parse", "HEAD"],
+                                capture_output=True, text=True).stdout.strip()
+        branch = ref or subprocess.run(["git", "-C", str(dest), "rev-parse", "--abbrev-ref", "HEAD"],
+                                       capture_output=True, text=True).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return None, None, f"git couldn't run ({getattr(e, 'strerror', None) or e})"
+    return commit, (branch if branch and branch != "HEAD" else None), None
+
+
+CLONE_HINT = ("Check the address. If the repository is private, git needs your login: "
+              "the git@… address works once you've set up an SSH key, or download it "
+              "yourself (`git clone …`) and scan the folder.")
+
+
+def remove_tree(path):
+    """Delete the temp copy. git makes some files read-only (on Windows that
+    stops rmtree), so those are made writable and tried again."""
+    def retry(func, p, *_):
+        os.chmod(p, stat.S_IWRITE)
+        func(p)
+    try:
+        if sys.version_info >= (3, 12):
+            shutil.rmtree(path, onexc=retry)
+        else:
+            shutil.rmtree(path, onerror=retry)
+    except OSError:
+        return False
+    return not Path(path).exists()
+
+
+# Files in a repo that change what the scanners report. Fine in your own repo;
+# in a stranger's they can switch checks off, so a URL scan names them.
+REPO_SETTINGS = (".plainsec", "bandit.yaml", ".gitleaks.toml", ".gitleaksignore", "osv-scanner.toml")
+
+
+def repo_settings(folder):
+    found = [n for n in REPO_SETTINGS if (Path(folder) / n).is_file()]
+    for p in Path(folder).rglob("osv-scanner.toml"):
+        rel = p.relative_to(folder).as_posix()
+        if ".git" not in p.relative_to(folder).parts and rel not in found:
+            found.append(rel)
+    return found
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("folder", nargs="?", default=".", help="project to scan")
+    ap.add_argument("folder", nargs="?", default=".",
+                    help="project folder to scan, or a repository address "
+                         "(https://github.com/owner/repo or git@…): it's downloaded "
+                         "to a temporary folder, scanned, and deleted")
     ap.add_argument("--out", help="also write the report to this .md file")
     ap.add_argument("--bandit-json", help="use saved bandit JSON instead of running it")
     ap.add_argument("--audit-json", help="use saved pip-audit JSON instead of running it")
@@ -1757,13 +2055,55 @@ def main(argv=None):
                     help="compare with the last scan but don't save this one")
     args = ap.parse_args(argv)
 
-    folder = Path(args.folder).expanduser()
+    # A folder that exists always wins (a folder can be named github.com).
+    if Path(args.folder).expanduser().exists():
+        return scan(Path(args.folder).expanduser(), args)
+    if not looks_like_url(args.folder):
+        # used to scan nothing and print a whole report of NOT CHECKED parts
+        print(f"plainsec: there's no folder `{args.folder}` here. Give a project folder "
+              "(like ~/my-project) or a repository address "
+              "(like https://github.com/owner/repo).", file=sys.stderr)
+        return 2
+    remote = parse_repo_url(args.folder)
+    if remote is None:
+        print("plainsec: that address isn't one plainsec can download. Use an https:// "
+              "address (like https://github.com/owner/repo) or an SSH one "
+              "(git@github.com:owner/repo).", file=sys.stderr)
+        return 2
+    print(f"Downloading {remote['shown']} with its full history (old commits are "
+          "checked for secrets too)…", file=sys.stderr)
+    tmp = tempfile.mkdtemp(prefix="plainsec-")
+    try:
+        dest = Path(tmp) / remote["name"]
+        commit, branch, err = clone_repo(remote, dest)
+        if err:
+            print(f"plainsec: couldn't download {remote['shown']}: {err}\n{CLONE_HINT}",
+                  file=sys.stderr)
+            return 2
+        remote.update(commit=commit, branch=branch, settings=repo_settings(dest))
+        return scan(dest, args, remote)
+    finally:
+        if not remove_tree(tmp):
+            print(f"Note: couldn't fully delete the temporary copy at {tmp}; "
+                  "you can delete that folder yourself.", file=sys.stderr)
+
+
+def scan(folder, args, remote=None):
+    """remote: set when folder is a temp copy of a repo address (see main)."""
     errors = []
 
     if args.bandit_json:
         bandit_data, err = load_json(args.bandit_json), None
     else:
         bandit_data, err = scan_code(folder)
+    code_partial = False
+    if not err:
+        failed_all, warning = bandit_unread(bandit_data, folder)
+        if failed_all:
+            err = warning
+        elif warning:
+            errors.append(warning)
+            code_partial = True      # missing findings must not read as "gone"
     if err:
         errors.append(f"code scan — {err}")
 
@@ -1822,13 +2162,13 @@ def main(argv=None):
     else:
         deps = parse_audit(audit_data)
     secrets = parse_gitleaks(secrets_data, root=folder)
-    code_ok = not any(e.startswith("code scan") for e in errors)
+    code_ok = not code_partial and not any(e.startswith("code scan") for e in errors)
     deps_ok = not any(e.startswith("dependency scan") for e in errors)
     secrets_ok = not any(e.startswith("secrets scan") for e in errors)
 
     # Compare ALL findings (before .plainsec / test hiding), so adding an
     # ignore line never looks like a fix.
-    spath = state_path(folder)
+    spath = state_path(folder, remote["key"] if remote else None)
     old = load_state(spath)
     # History tracks notices too, so moving a package between "risky" and
     # "maintenance notice" is never reported as new or gone.
@@ -1856,13 +2196,18 @@ def main(argv=None):
     skipped_ids = {id(f) for items in skipped.values() for f in items}
     hidden_ids = set() if args.all else {
         id(f) for f in code if f["in_test"] and f["id"] in NORMAL_IN_TESTS}
-    report = build_report(folder.resolve().name, code, deps, errors,
+    # A URL scan's printed commands point at the reader's own copy (~/<repo>);
+    # the temp copy is deleted before anyone reads the report.
+    shown_root = Path.home() / remote["name"] if remote else folder
+    title = remote["shown"].split("://", 1)[-1] if remote else folder.resolve().name
+    report = build_report(title, code, deps, errors,
                           show_all=args.all, skipped=skipped, unused=unused,
                           changes=changes, hidden_ids=hidden_ids,
                           skipped_ids=skipped_ids,
                           secrets=secrets if secrets_ok else "not-checked",
                           secrets_info=secrets_data or {}, dep_info=dep_info,
-                          root=folder, n_copies=n_copies)
+                          root=shown_root, n_copies=n_copies, remote=remote,
+                          code_partly=code_partial)
     print(report)
 
     if args.out:

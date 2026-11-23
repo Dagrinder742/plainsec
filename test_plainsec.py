@@ -139,7 +139,9 @@ class TestReport(unittest.TestCase):
                              "dependency scan — pip-audit is not installed"])
         self.assertNotIn("Nothing high", report)
         self.assertNotIn("No known vulnerabilities", report)
-        self.assertEqual(report.count("NOT CHECKED"), 3)   # headline + both sections
+        # headline (dependencies + code) + both sections
+        self.assertEqual(report.count("NOT CHECKED"), 4)
+        self.assertNotIn("0 to fix first", report)   # headline once said this about no scan
 
 
 class TestRealRunFixes(unittest.TestCase):
@@ -1405,6 +1407,299 @@ class TestCli(unittest.TestCase):
                  mock.patch.object(plainsec.shutil, "which", return_value=None):
                 rc = plainsec.main([tmp, "--bandit-json", str(b), "--audit-json", str(a)])
             self.assertEqual(rc, 1, "secrets not checked must not count as clean")
+
+    def test_missing_folder_is_an_error_not_a_report(self):
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(err):
+            rc = plainsec.main(["/no/such/folder-zz"])
+        self.assertEqual(rc, 2)
+        self.assertIn("there's no folder", err.getvalue())
+        self.assertNotIn("# Security report", out.getvalue())
+
+
+def git(*args, cwd=None):
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True,
+                   env=dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@e",
+                            GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@e"))
+
+
+def make_repo(path, files):
+    path.mkdir(parents=True)
+    git("init", "-q", "-b", "main", cwd=path)
+    for name, text in files.items():
+        p = path / name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+    git("add", "-A", cwd=path)
+    git("commit", "-q", "-m", "first", cwd=path)
+
+
+class TestRepoUrl(unittest.TestCase):
+    """Stage 10: scan a repository by its address."""
+
+    def test_addresses_people_paste(self):
+        p = plainsec.parse_repo_url
+        a = p("https://github.com/Owner/My-App")
+        self.assertEqual((a["url"], a["shown"], a["name"], a["ref"], a["web"]),
+                         ("https://github.com/Owner/My-App", "https://github.com/Owner/My-App",
+                          "My-App", None, "https://github.com/Owner/My-App"))
+        self.assertEqual(p("https://github.com/o/r.git/")["url"], "https://github.com/o/r.git")
+        self.assertEqual(p("https://github.com/o/r.git")["shown"], "https://github.com/o/r")
+        self.assertEqual(p("github.com/o/r")["url"], "https://github.com/o/r")
+        # copied from the browser while looking at a branch, a file or the issues
+        self.assertEqual(p("https://github.com/o/r/tree/dev")["ref"], "dev")
+        self.assertEqual(p("https://github.com/o/r/tree/feature/x")["ref"], "feature/x")
+        self.assertEqual(p("https://github.com/o/r/blob/main/a.py")["url"], "https://github.com/o/r")
+        self.assertIsNone(p("https://github.com/o/r/issues")["ref"])
+        s = p("git@github.com:o/r.git")
+        self.assertEqual((s["url"], s["shown"], s["name"]), ("git@github.com:o/r.git", "git@github.com:o/r", "r"))
+        self.assertEqual(p("ssh://git@example.org:2222/team/r")["url"], "ssh://git@example.org:2222/team/r")
+        g = p("https://gitlab.com/group/sub/r/-/tree/main")
+        self.assertEqual((g["url"], g["ref"], g["web"]), ("https://gitlab.com/group/sub/r", "main", None))
+
+    def test_unsafe_or_unknown_addresses_are_refused(self):
+        # git itself would take ext:: (runs a command) and file:// (local files)
+        for bad in ("ext::sh -c touch% /tmp/x", "file:///etc", "http://github.com/o/r",
+                    "https://github.com/onlyowner", "https://github.com/o/../../etc",
+                    "https://github.com/o/r;rm -rf ~", "-uhttps://github.com/o/r", "ftp://x/y"):
+            self.assertIsNone(plainsec.parse_repo_url(bad), bad)
+        for url_like in ("ext::sh -c x", "file:///etc", "ftp://x/y", "git@host:x"):
+            self.assertTrue(plainsec.looks_like_url(url_like), url_like)
+        self.assertFalse(plainsec.looks_like_url("my-project"))
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as err, \
+             mock.patch.object(plainsec, "clone_repo") as clone:
+            rc = plainsec.main(["ext::sh -c touch% /tmp/x"])
+        self.assertEqual(rc, 2)
+        clone.assert_not_called()
+        self.assertIn("isn't one plainsec can download", err.getvalue())
+
+    def test_login_in_the_address_is_never_shown(self):
+        a = plainsec.parse_repo_url("https://me:ghp_secret123@github.com/o/r")
+        self.assertEqual(a["url"], "https://me:ghp_secret123@github.com/o/r")   # git needs it
+        self.assertNotIn("ghp_secret123", a["shown"] + a["key"])
+        proc = subprocess.CompletedProcess([], 128, "", f"fatal: repository '{a['url']}/' not found")
+        self.assertNotIn("ghp_secret123", plainsec._git_error(proc, a))
+
+    def test_same_repo_shares_history_whatever_the_address(self):
+        keys = {plainsec.parse_repo_url(u)["key"] for u in (
+            "https://github.com/Owner/R", "https://github.com/owner/r.git",
+            "git@github.com:owner/r", "github.com/owner/r/", "ssh://git@github.com/owner/r")}
+        self.assertEqual(keys, {"github.com/owner/r"})
+        self.assertNotEqual(plainsec.parse_repo_url("https://github.com/o/r/tree/dev")["key"],
+                            plainsec.parse_repo_url("https://github.com/o/r")["key"])
+        self.assertEqual(plainsec.state_path("/tmp/a", "github.com/o/r"),
+                         plainsec.state_path("/tmp/b", "github.com/o/r"))
+
+    def test_git_errors_in_plain_english(self):
+        # real messages from git 2.x (Nov 23); the last line alone was useless
+        info = plainsec.parse_repo_url("git@github.com:o/r")
+        ssh = ("Host key verification failed.\nfatal: Could not read from remote repository.\n\n"
+               "Please make sure you have the correct access rights\nand the repository exists.\n")
+        msg = plainsec._git_error(subprocess.CompletedProcess([], 128, "", ssh), info)
+        self.assertTrue(msg.startswith("this device's SSH doesn't know that server yet"), msg)
+        self.assertNotIn("and the repository exists", msg)
+        missing = "remote: Repository not found.\nfatal: repository 'https://github.com/o/zz/' not found\n"
+        self.assertIn("doesn't exist, or it's private",
+                      plainsec._git_error(subprocess.CompletedProcess([], 128, "", missing), info))
+        branch = "fatal: Remote branch nope not found in upstream origin\n"
+        self.assertIn("no branch or tag",
+                      plainsec._git_error(subprocess.CompletedProcess([], 128, "", branch), info))
+
+    def test_clone_command_is_safe(self):
+        info = plainsec.parse_repo_url("https://github.com/o/r/tree/dev")
+        calls = []
+        def fake_run(cmd, **kw):
+            calls.append((cmd, kw))
+            return subprocess.CompletedProcess(cmd, 0, "abc123\n", "")
+        with mock.patch.object(plainsec.subprocess, "run", fake_run):
+            commit, branch, err = plainsec.clone_repo(info, Path("/tmp/x/r"))
+        cmd, kw = calls[0]
+        self.assertEqual(cmd[:2], ["git", "clone"])
+        self.assertIn("core.symlinks=false", cmd)
+        self.assertEqual(cmd[cmd.index("--branch") + 1], "dev")
+        self.assertEqual(cmd[-3:], ["--", "https://github.com/o/r", "/tmp/x/r"])   # never read as an option
+        self.assertEqual(kw["env"]["GIT_TERMINAL_PROMPT"], "0")
+        self.assertNotIn("shell", kw)
+        self.assertEqual((commit, branch, err), ("abc123", "dev", None))
+
+    def test_real_clone_turns_symlinks_into_plain_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp, "src")
+            make_repo(src, {"app.py": "x = 1\n"})
+            os.symlink("/etc/hostname", src / "link.py")
+            git("add", "-A", cwd=src); git("commit", "-q", "-m", "link", cwd=src)
+            info = {"url": str(src), "shown": "https://github.com/o/src", "ref": None,
+                    "base_key": "k", "key": "k"}
+            dest = Path(tmp, "out", "src")
+            commit, branch, err = plainsec.clone_repo(info, dest)
+            self.assertIsNone(err)
+            self.assertEqual(branch, "main")
+            self.assertEqual(len(commit), 40)
+            self.assertFalse((dest / "link.py").is_symlink())
+            self.assertEqual((dest / "link.py").read_text(), "/etc/hostname")
+
+    def test_tree_link_into_a_folder_finds_the_branch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp, "src")
+            make_repo(src, {"src/app.py": "x = 1\n"})
+            git("branch", "feature/x", cwd=src)
+            info = {"url": str(src), "shown": "s", "ref": "feature/x/src/app", "base_key": "k"}
+            self.assertEqual(plainsec.resolve_ref(info), ("feature/x", "src/app", None))
+            info["ref"] = "main/src"
+            self.assertEqual(plainsec.resolve_ref(info), ("main", "src", None))
+            dest = Path(tmp, "out", "src")
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                commit, branch, e = plainsec.clone_repo(info, dest)
+            self.assertIsNone(e)
+            self.assertEqual((branch, info["ref"], info["key"]), ("main", "main", "k#main"))
+            self.assertIn("whole repository, not just `src`", err.getvalue())
+
+    def run_url(self, url, files, leaks=(), clone_error=None, extra=()):
+        """main() on an address, with the download replaced by a local repo."""
+        seen = {}
+        def fake_clone(info, dest):
+            seen["dest"] = dest
+            if clone_error:
+                return None, None, clone_error
+            make_repo(dest, files)
+            return "0123456789abcdef0123", "main", None
+        with tempfile.TemporaryDirectory() as tmp:
+            b = Path(tmp, "b.json"); b.write_text('{"results": []}')
+            a = Path(tmp, "a.json"); a.write_text('{"dependencies": []}')
+            g = Path(tmp, "g.json"); g.write_text(json.dumps(list(leaks)))
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+                 mock.patch.object(plainsec, "clone_repo", fake_clone):
+                rc = plainsec.main([url, "--bandit-json", str(b), "--audit-json", str(a),
+                                    "--secrets-json", str(g), *extra])
+        return rc, out.getvalue(), err.getvalue(), seen.get("dest")
+
+    def test_url_scan_end_to_end(self):
+        l = leak("generic-api-key", "cfg.py", 4, "1523accfffff", "2026-09-12T00:00:00Z")
+        files = {"cfg.py": "a\nb\nc\nAPI = 'x'\n", ".gitleaks.toml": "# allow\n"}
+        with tempfile.TemporaryDirectory() as state, \
+             mock.patch.dict(os.environ, {"PLAINSEC_STATE_DIR": state}):
+            rc, out, err, dest = self.run_url("https://github.com/demo/app", files, [l])
+            self.assertEqual(rc, 1)
+            self.assertIn("# Security report: github.com/demo/app", out)
+            self.assertIn("Scanned `https://github.com/demo/app` (branch `main`, commit "
+                          "`0123456789ab`) from a temporary copy that was deleted", out)
+            self.assertIn("own copy at `~/app`", out)
+            self.assertIn("`git clone https://github.com/demo/app ~/app`", out)
+            self.assertIn("https://github.com/demo/app/blob/0123456789ab/ followed by its path", out)
+            # the check command points at the reader's copy, never the deleted temp folder
+            self.assertIn("check: `git -C ~/app show 1523accf:'cfg.py' | sed -n 4p`", out)
+            self.assertNotIn(str(dest.parent), out)
+            self.assertIn("own scanner settings (`.gitleaks.toml`)", out)
+            self.assertFalse(dest.parent.exists(), "temp copy must be deleted")
+            self.assertIn("Downloading https://github.com/demo/app", err)
+            # second scan: a new temp folder, same history
+            rc, out, err, dest2 = self.run_url("git@github.com:demo/app.git", files, [l])
+            self.assertNotEqual(dest, dest2)
+            self.assertIn("0 new, 0 gone since last scan", out)
+            self.assertEqual(len(os.listdir(state)), 1)
+
+    def test_failed_download_cleans_up_and_explains(self):
+        rc, out, err, dest = self.run_url("https://github.com/demo/zz", {},
+                                          clone_error="the repository doesn't exist, or it's private")
+        self.assertEqual(rc, 2)
+        self.assertEqual(out, "")
+        self.assertIn("couldn't download https://github.com/demo/zz: the repository doesn't exist", err)
+        self.assertIn("git@… address", err)
+        self.assertFalse(dest.parent.exists())
+
+    def test_remove_tree_handles_read_only_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp, "copy", "objects")
+            d.mkdir(parents=True)
+            (d / "pack").write_text("x")
+            os.chmod(d / "pack", 0o444)
+            self.assertTrue(plainsec.remove_tree(Path(tmp, "copy")))
+
+    def test_cargo_never_starts_inside_the_project(self):
+        # cargo reads .cargo/config.toml (can name a program to run as rustc)
+        # and rustup reads rust-toolchain.toml from the folder it starts in.
+        # VERIFIED by hand (Nov 23): a rustc-wrapper script ran when cargo
+        # started in the project, not with --manifest-path from ~. Applies to
+        # local scans too: a repo you cloned yourself is just as untrusted.
+        calls = []
+        def fake_run(cmd, **kw):
+            calls.append((cmd, kw))
+            return subprocess.CompletedProcess(cmd, 0, "solana-program v2.0.0\n", "")
+        with mock.patch.object(plainsec.shutil, "which", return_value="/usr/bin/cargo"), \
+             mock.patch.object(plainsec.subprocess, "run", fake_run), \
+             tempfile.TemporaryDirectory() as tmp, contextlib.chdir(tmp) \
+                if hasattr(contextlib, "chdir") else contextlib.nullcontext():
+            REAL_CARGO_SHIPPING("/tmp/c/app", "prog/Cargo.lock")
+            REAL_CARGO_VIA("/tmp/c/app", "prog/Cargo.lock", "borsh", "0.10.4",
+                           {"solana-program"}, True)
+            REAL_CARGO_SHIPPING(None, "app/prog/Cargo.lock")          # relative: made absolute
+            here = Path.cwd()
+        manifest = str(Path("/tmp/c/app/prog").resolve() / "Cargo.toml")
+        for cmd, kw in calls[:2]:
+            self.assertEqual(kw["cwd"], Path.home())
+            self.assertEqual(cmd[cmd.index("--manifest-path") + 1], manifest)
+        via = calls[1][0]
+        self.assertEqual(via[via.index("-i") + 1], "borsh@0.10.4")
+        self.assertEqual(via[via.index("-e") + 1], "no-dev")
+        self.assertEqual(calls[2][1]["cwd"], Path.home())
+        self.assertEqual(calls[2][0][calls[2][0].index("--manifest-path") + 1],
+                         str(here.resolve() / "app/prog/Cargo.toml"))
+
+
+# Real shape (bandit 1.7.10 from Ubuntu apt on Python 3.14, Nov 23): every file
+# skipped, results empty, metrics still list the files.
+BANDIT_CRASHED = {"errors": [
+    {"filename": "/p/app.py", "reason": "exception while scanning file"},
+    {"filename": "/p/test_app.py", "reason": "exception while scanning file"}],
+    "metrics": {"/p/app.py": {}, "/p/test_app.py": {}, "_totals": {}}, "results": []}
+
+
+class TestBanditUnread(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.state = tempfile.TemporaryDirectory()
+        self.env = mock.patch.dict(os.environ, {"PLAINSEC_STATE_DIR": self.state.name})
+        self.env.start()
+
+    def tearDown(self):
+        self.env.stop(); self.tmp.cleanup(); self.state.cleanup()
+
+    def run_with(self, bandit):
+        b = self.dir / "b.json"; b.write_text(json.dumps(bandit))
+        a = self.dir / "a.json"; a.write_text('{"dependencies": []}')
+        g = self.dir / "g.json"; g.write_text("[]")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            rc = plainsec.main([str(self.dir), "--bandit-json", str(b), "--audit-json", str(a),
+                                "--secrets-json", str(g)])
+        return rc, out.getvalue()
+
+    def test_every_file_crashed_is_not_an_all_clear(self):
+        rc, out = self.run_with(BANDIT_CRASHED)
+        self.assertEqual(rc, 1)
+        self.assertIn("code NOT CHECKED", out)
+        self.assertNotIn("0 low-priority", out)
+        self.assertNotIn("Nothing high or medium", out)
+        self.assertIn("bandit couldn't read any of your Python files", out)
+        self.assertIn("too old for your Python version", out)
+
+    def test_some_files_unread_are_named_and_not_counted_as_gone(self):
+        found = {"results": [{"filename": str(self.dir / "app.py"), "line_number": 3,
+                              "issue_severity": "LOW", "test_id": "B311", "code": "3 x = random.random()\n"}],
+                 "errors": [], "metrics": {}}
+        self.run_with(found)                                    # baseline: 1 finding
+        partial = {"results": [], "errors": [
+            {"filename": str(self.dir / "app.py"), "reason": "syntax error while parsing AST from file"}],
+            "metrics": {str(self.dir / "app.py"): {}, str(self.dir / "ok.py"): {}, "_totals": {}}}
+        rc, out = self.run_with(partial)
+        self.assertIn("some code files NOT CHECKED", out)
+        self.assertIn("1 Python file (`app.py`) — bandit couldn't parse it", out)
+        self.assertNotIn("Gone", out)
+        self.assertNotIn("1 gone", out)
+        rc, out = self.run_with(found)                          # baseline was kept
+        self.assertIn("0 new, 0 gone", out)
 
 
 if __name__ == "__main__":
