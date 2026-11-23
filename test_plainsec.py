@@ -652,7 +652,9 @@ class TestSecrets(unittest.TestCase):
         self.assertIn("registry.json` line 6 — first committed in 103f2fb2 — file no longer exists, "
                       "but it's still in history — the name says it's a hash", out)
         self.assertIn("the name says it's an ID", out)
-        self.assertEqual(out.count("the name says"), 2)   # plain 'token' gets no hint
+        # since v0.2.3 a 'token' name gets a note too, and it isn't a playing-down one
+        self.assertIn("the name says it's a token: a working credential", out)
+        self.assertIn("**3 possible secrets (2 named like IDs/hashes)", out)
         self.assertNotIn("REDACTED", out)
 
     def test_api_key_id_is_not_played_down(self):
@@ -670,9 +672,44 @@ class TestSecrets(unittest.TestCase):
         self.assertIn("half of a login", out)
 
     def test_name_hint_never_uses_the_value(self):
-        self.assertEqual(plainsec.name_hint('token = "sha256_looking_value"'), "")
+        # a hash-looking VALUE must not earn the "usually fine" hash note
+        self.assertNotIn("hash", plainsec.name_hint('token = "sha256_looking_value"'))
+        self.assertNotIn("hash", plainsec.name_hint('note = "sha256_looking_value"'))
+        self.assertEqual(plainsec.name_hint('note = "sha256_looking_value"'), "")
         self.assertIn("hash", plainsec.name_hint('"api_token_hash": "x"'))
         self.assertEqual(plainsec.name_hint(""), "")
+
+    def test_credential_names_get_a_check_first_note(self):
+        # Real case (Nov 23, trinity_master build_vault.py): a getenv default,
+        # `CLOUDFLARE_TUNNEL_TOKEN", "REDACTED"`, has no : or = and got no note.
+        cases = {
+            'CLOUDFLARE_TUNNEL_TOKEN", "REDACTED"': "token",
+            'OKX_API_SECRET = "REDACTED"': "secret",
+            '"okx_passphrase": "REDACTED"': "passphrase",
+            'db_password: REDACTED': "password",
+            "GEMINI_API_KEY='REDACTED'": "API key",
+            'signing_private_key = "REDACTED"': "private key",
+            'aws_credentials = "REDACTED"': "credential",
+        }
+        for match, kind in cases.items():
+            self.assertEqual(plainsec.name_hint(match), plainsec.secret_name_hint(kind), match)
+            self.assertFalse(plainsec.plays_down(plainsec.name_hint(match)), match)
+        # the more specific notes still win
+        self.assertIn("hash", plainsec.name_hint('api_token_hash": "REDACTED"'))
+        self.assertIs(plainsec.name_hint('API_KEY_ID = "REDACTED"'), plainsec.KEY_ID_HINT)
+        self.assertIn("an ID", plainsec.name_hint('token_id = "REDACTED"'))
+        self.assertEqual(plainsec.name_hint('Sec-WebSocket-Key: REDACTED'), "")   # RFC example
+        # and in the report: noted, but not counted as probably harmless
+        t = leak("generic-api-key", "build_vault.py", 14, "2b422053ff", "2026-07-12T00:00:00Z")
+        t["Match"] = 'CLOUDFLARE_TUNNEL_TOKEN", "REDACTED"'
+        h = leak("generic-api-key", "tenant_registry.json", 6, "5912f466ff")
+        h["Match"] = 'api_token_hash": "REDACTED"'
+        _, out = self.run_with([t, h])
+        self.assertIn("**2 possible secrets (1 named like IDs/hashes)", out)
+        self.assertIn("`build_vault.py` line 14 — first committed in 2b422053 (2026-07-12) — "
+                      "file no longer exists, but it's still in history — the name says it's "
+                      "a token: a working credential unless it's a placeholder or test value, "
+                      "so check this one first", out)
 
     def test_files_mode_check_command(self):
         (self.dir / "cfg.py").write_text("x")

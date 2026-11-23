@@ -99,6 +99,9 @@ Useful options:
 - **Secrets are never printed.** gitleaks runs with `--redact`, and the report only shows
   rule, file, line, commit and date. For pattern-based guesses it says *check whether
   it's real first* and gives you the command to look at the line in your own terminal.
+  The setting's *name* (never its value) adds a note: `*_TOKEN`, `*_SECRET`, `*_PASSWORD`
+  and similar are flagged to check first; names that say hash or ID are noted as usually
+  fine, except API key IDs, which are half of a login.
   Deleted files that still exist in git history are called out.
 - **Dependencies:** one entry per package per file, the version that fixes **all** of its
   issues, and advice that fits the ecosystem (`pip`, `cargo update`, `npm`…). Rust advice

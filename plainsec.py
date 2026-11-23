@@ -1038,10 +1038,38 @@ KEY_ID_HINT = ("the name says it's an API key ID: half of a login (it's paired w
                "ever committed too, rotate the key")
 
 
+# Names that say "this is a credential". Unlike the ID/hash notes this one
+# doesn't play anything down: real case (Nov 23), trinity_master's
+# `CLOUDFLARE_TUNNEL_TOKEN", "REDACTED"` got no note at all, and nothing said
+# it deserved a look before the ID/hash ones.
+_SECRET_NAMES = (
+    (r"passphrase$", "passphrase"),
+    (r"(passw(or)?d|pwd)$", "password"),
+    (r"private[-_ ]?key$", "private key"),
+    (r"api[-_ ]?key$", "API key"),
+    (r"secret[-_ ]?key$|secret$", "secret"),
+    (r"credentials?$", "credential"),
+    (r"token$", "token"),
+)
+
+
+def secret_name_hint(kind):
+    return (f"the name says it's a {kind}: a working credential unless it's a "
+            "placeholder or test value, so check this one first")
+
+
+def setting_name(match):
+    """The setting's NAME at the start of gitleaks' redacted match, never the
+    value. Real shapes: `market_id: "REDACTED"`, `api_token_hash": "REDACTED"`,
+    `CLOUDFLARE_TUNNEL_TOKEN", "REDACTED"` (a getenv default: no : or = at all)."""
+    m = re.match(r"""\s*["'`]?([A-Za-z_][A-Za-z0-9_.\-]*)""", match or "")
+    return m.group(1).lower() if m else ""
+
+
 def name_hint(match):
-    """Look only at the setting's NAME (before : or =) in gitleaks' redacted
-    match, never the value. Returns a short note, or ""."""
-    name = re.split(r"[:=]", match or "", maxsplit=1)[0].strip().strip("\"'` ").lower()
+    """Look only at the setting's NAME in gitleaks' redacted match, never the
+    value. Returns a short note, or ""."""
+    name = setting_name(match)
     if not name or len(name) > 60:
         return ""
     if re.search(r"key[-_ ]?id$", name):
@@ -1051,7 +1079,16 @@ def name_hint(match):
                 "Usually fine")
     if re.search(r"(^|[^a-z])(id|uuid)$", name) or name.endswith("_id"):
         return "the name says it's an ID: IDs usually aren't secret on their own"
+    for pattern, kind in _SECRET_NAMES:
+        if re.search(pattern, name):
+            return secret_name_hint(kind)
     return ""
+
+
+def plays_down(hint):
+    """True for notes that say "probably fine" (ID / hash). Only those are
+    counted as "named like IDs/hashes" in the headline."""
+    return bool(hint) and ("it's an ID:" in hint or "it's a hash:" in hint)
 
 
 def shell_path(path):
@@ -1523,7 +1560,7 @@ def headline(shown, hidden, deps, skipped=None, deps_checked=True, secrets=None,
         if secrets == "not-checked":
             parts.append("secrets NOT CHECKED")
         else:
-            likely = sum(1 for f in secrets if f.get("hint") and f["hint"] != KEY_ID_HINT)
+            likely = sum(1 for f in secrets if plays_down(f.get("hint")))
             parts.append(f"{len(secrets)} possible secret{'s' if len(secrets) != 1 else ''}"
                          + (f" ({likely} named like IDs/hashes)" if likely else ""))
     parts.append(dep_part)
