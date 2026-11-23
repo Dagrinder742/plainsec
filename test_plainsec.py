@@ -2130,6 +2130,9 @@ class TestPackageJsonWithoutLock(unittest.TestCase):
         deps = out.split("## 1.")[1].split("## 2.")[0]
         self.assertIn("NOT CHECKED: `web/package.json` lists dependencies but has no lock file", deps)
         self.assertIn("some dependency files NOT CHECKED", out.splitlines()[2])
+        # Real case (Nov 23, LipStickFighting rescan): the same sentence for
+        # server/package.json appeared twice, as a top warning and in section 1.
+        self.assertEqual(out.count("lists dependencies but has no lock file"), 1)
 
     def test_no_false_alarm(self):
         self.pkg(".", {})                                   # nothing declared

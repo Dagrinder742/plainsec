@@ -2584,8 +2584,9 @@ def scan(folder, args, remote=None):
                 # never "0 risky dependencies … nothing to check"
                 errors.append(f"dependency scan — {msg}")
             else:
+                # said once, in section 1 (real case: LipStickFighting showed it twice);
+                # the headline says "some dependency files NOT CHECKED"
                 dep_info["unlocked_npm"] = unlocked
-                errors.append(f"some dependency files — {msg}")
     else:
         deps = parse_audit(audit_data)
     secrets = parse_gitleaks(secrets_data, root=folder)
@@ -2652,7 +2653,8 @@ def scan(folder, args, remote=None):
         print(f"Saved to {args.out}", file=sys.stderr)
 
     # Exit 1 if anything needs attention, so it can gate a git hook later.
-    return 1 if (code or deps or secrets or errors) else 0
+    # an unchecked package.json is never "clean", even with nothing else found
+    return 1 if (code or deps or secrets or errors or dep_info.get("unlocked_npm")) else 0
 
 
 if __name__ == "__main__":
