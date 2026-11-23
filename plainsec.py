@@ -2605,9 +2605,12 @@ def scan(folder, args, remote=None):
         dep_info["unlocked_skipped"] = unlocked_skipped
         if unlocked:
             msg = unlocked_message(unlocked, shown_root)
-            if dep_info["no_sources"] or not (osv_data or {}).get("results"):
+            if dep_info["no_sources"]:
                 # nothing else was checked: the whole section is NOT CHECKED,
-                # never "0 risky dependencies … nothing to check"
+                # never "0 risky dependencies … nothing to check". Not judged by
+                # empty "results": osv-scanner 2.4.0 doesn't list a CLEAN lock file
+                # there (real case: IBM/graphiql-cost-plugin's clean package-lock.json
+                # gave "results": [], and everything was called NOT CHECKED).
                 errors.append(f"dependency scan — {msg}")
             else:
                 # said once, in section 1 (real case: LipStickFighting showed it twice);

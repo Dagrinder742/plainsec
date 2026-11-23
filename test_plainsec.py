@@ -2144,6 +2144,39 @@ class TestPackageJsonWithoutLock(unittest.TestCase):
         self.assertNotIn("every dependency file in the project.", deps)
         self.assertIn("except the ones marked NOT CHECKED below", deps)
 
+    def test_clean_lock_plus_unlocked_package_json_is_partly_checked(self):
+        # Real case (Nov 23, IBM/graphiql-cost-plugin @ 956a2cc): osv-scanner 2.4.0
+        # folder scan exit 128 (it can't walk here), then `-L package-lock.json` exit 0
+        # with "results": [] — a CLEAN lock isn't listed in results (stderr only:
+        # "Scanned …/package-lock.json file and found 105 packages"). With
+        # example/package.json unlocked, the report said "dependencies NOT CHECKED"
+        # for everything, though the root lock had been checked.
+        (self.dir / "package.json").write_text(json.dumps({"devDependencies": {"jest": "29"}}))
+        (self.dir / "package-lock.json").write_text("{}")
+        self.pkg("example", {"react": "^16.14.0"})
+        calls = []
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            if "-L" in cmd:
+                return mock.Mock(returncode=0, stdout='{"results": []}', stderr="")
+            return mock.Mock(returncode=128, stdout="", stderr="No package sources found")
+        out = io.StringIO()
+        real_which = plainsec.shutil.which
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()), \
+             mock.patch.object(plainsec.shutil, "which",
+                               side_effect=lambda t: "/usr/bin/osv-scanner" if t == "osv-scanner" else real_which(t)), \
+             mock.patch.object(plainsec.subprocess, "run", side_effect=fake_run):
+            rc = plainsec.main([str(self.dir), "--bandit-json", str(self.dir / "b.json"),
+                                "--secrets-json", str(self.dir / "g.json")])
+        out = out.getvalue()
+        head = out.splitlines()[2]
+        self.assertNotIn("dependencies NOT CHECKED", head)
+        self.assertIn("0 risky dependencies · some dependency files NOT CHECKED", head)
+        deps = out.split("## 1.")[1].split("## 2.")[0]
+        self.assertIn("file by file (1: `package-lock.json`)", deps)
+        self.assertIn("NOT CHECKED: `example/package.json`", deps)
+        self.assertEqual(rc, 1)
+
     def test_plainsec_skip_moves_an_unlocked_package_json_to_section_5(self):
         # .plainsec already moves dependency FILES in skipped paths to section 5;
         # an unlocked package.json there still came out as NOT CHECKED (and as the
