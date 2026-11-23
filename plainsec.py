@@ -1845,7 +1845,8 @@ def build_report(name, code, deps, errors, show_all=False, skipped=None, unused=
         out.append("")
 
     dep_skipped = (dep_info or {}).get("skipped") or {}
-    if skipped or unused or dep_skipped:
+    unlocked_skipped = (dep_info or {}).get("unlocked_skipped") or {}
+    if skipped or unused or dep_skipped or unlocked_skipped:
         out.append("## 5. Skipped by your .plainsec file")
         out.append("Not checked in detail because you listed these paths. "
                    "Run with `--all` to include them.")
@@ -1861,6 +1862,9 @@ def build_report(name, code, deps, errors, show_all=False, skipped=None, unused=
             out.append(f"- `{pat}` — {len(items)} vulnerable dependenc"
                        f"{'y' if len(items) == 1 else 'ies'} in "
                        f"{', '.join(sorted({d['source'] for d in items}))}")
+        for pat, files in unlocked_skipped.items():
+            out.append(f"- `{pat}` — " + ", ".join(f"`{f}`" for f in files)
+                       + " (lists dependencies, no lock file: not checked)")
         for pat in unused or []:
             out.append(f"- `{pat}` — matched nothing. Typo, or the path moved?")
         out.append("")
@@ -2016,6 +2020,9 @@ def render_deps(deps, failed, info, root=None):
             return out + [", ".join(f"`{f}`" for f in info["no_deps_declared"])
                           + " declares no dependencies, so there was nothing to check.", ""]
         if info.get("no_sources"):
+            if info.get("unlocked_skipped"):
+                return out + ["Nothing to check outside the paths your .plainsec skips "
+                              "(see section 5).", ""]
             return out + ["No dependency files found, so there was nothing to check.", ""]
     else:
         out.append("Checked with pip-audit: the top-level requirements.txt only. "
@@ -2581,6 +2588,16 @@ def scan(folder, args, remote=None):
         dep_info["no_deps_declared"] = (osv_data or {}).get("no_deps_declared")
         dep_info["not_checked_files"] = (osv_data or {}).get("not_checked_files")
         unlocked = (osv_data or {}).get("unlocked_npm") or []
+        # .plainsec applies here too, like it does to dependency files (counted in
+        # section 5, not reported as NOT CHECKED); --all ignores it as usual.
+        skip_pats = [] if args.all else load_ignore(folder)
+        unlocked_skipped = {}
+        for f in list(unlocked):
+            hit = next((pt for pt in skip_pats if path_matches(f, pt)), None)
+            if hit:
+                unlocked_skipped.setdefault(hit, []).append(f)
+                unlocked.remove(f)
+        dep_info["unlocked_skipped"] = unlocked_skipped
         if unlocked:
             msg = unlocked_message(unlocked, shown_root)
             if dep_info["no_sources"] or not (osv_data or {}).get("results"):
@@ -2633,6 +2650,7 @@ def scan(folder, args, remote=None):
         deps, dep_info["skipped"] = deps_kept, dep_skipped
         unread_all = list(unread["invalid"]) + unread["other"]
         unused = [p for p in unused if p not in dep_skipped
+                  and p not in (dep_info.get("unlocked_skipped") or {})
                   and not any(path_matches(f, p) for f in unread_all)]
     # After history (which keeps every copy) AND after .plainsec skips: merging
     # first once let the kept copy be a skipped one, so v0.1.12 showed 57

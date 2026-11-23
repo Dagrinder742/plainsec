@@ -2139,6 +2139,31 @@ class TestPackageJsonWithoutLock(unittest.TestCase):
         self.assertNotIn("every dependency file in the project.", deps)
         self.assertIn("except the ones marked NOT CHECKED below", deps)
 
+    def test_plainsec_skip_moves_an_unlocked_package_json_to_section_5(self):
+        # .plainsec already moves dependency FILES in skipped paths to section 5;
+        # an unlocked package.json there still came out as NOT CHECKED (and as the
+        # whole dependency section failing), ignoring the user's skip.
+        self.pkg("old/server", {"express": "4"})
+        (self.dir / ".plainsec").write_text("old/\n")
+        rc, out = self.run_main()
+        self.assertNotIn("NOT CHECKED", out)
+        self.assertNotIn("No dependency files found", out)
+        sec5 = out.split("## 5.")[1]
+        self.assertIn("`old/` — `old/server/package.json` (lists dependencies, no lock file: not checked)", sec5)
+        self.assertNotIn("matched nothing", sec5)
+        self.assertEqual(rc, 0)
+        # --all ignores .plainsec, so it's NOT CHECKED again
+        out2 = io.StringIO()
+        real_which = plainsec.shutil.which
+        with contextlib.redirect_stdout(out2), contextlib.redirect_stderr(io.StringIO()), \
+             mock.patch.object(plainsec.shutil, "which",
+                               side_effect=lambda t: "/usr/bin/osv-scanner" if t == "osv-scanner" else real_which(t)), \
+             mock.patch.object(plainsec.subprocess, "run",
+                               return_value=mock.Mock(returncode=128, stdout="", stderr="")):
+            plainsec.main([str(self.dir), "--all", "--bandit-json", str(self.dir / "b.json"),
+                           "--secrets-json", str(self.dir / "g.json")])
+        self.assertIn("dependencies NOT CHECKED", out2.getvalue())
+
     def test_no_false_alarm(self):
         self.pkg(".", {})                                   # nothing declared
         self.pkg("locked", {"a": "1"}); (self.dir / "locked" / "package-lock.json").write_text("{}")
