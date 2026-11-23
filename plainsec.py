@@ -1050,6 +1050,12 @@ _SECRET_NAMES = (
     (r"secret[-_ ]?key$|secret$", "secret"),
     (r"credentials?$", "credential"),
     (r"token$", "token"),
+    # Real cases (Nov 23): `aws_secret_access_key` (test_keys keys:5, the secret
+    # half of an AWS key), `secret_key_base` (Rails, leaky-repo secrets.yml) and
+    # docker's `auth` (base64 user:password, leaky-repo .docker/.dockercfg) got
+    # no note. Checked after the endings above; the hash / ID notes still win.
+    (r"secret", "secret"),
+    (r"^auth$", "login (user name and password)"),
 )
 
 

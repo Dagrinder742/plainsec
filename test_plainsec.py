@@ -679,6 +679,24 @@ class TestSecrets(unittest.TestCase):
         self.assertNotIn("a API key", note)
         self.assertIn("it's a token:", plainsec.name_hint('oauth_token: "REDACTED"'))
 
+    def test_secret_anywhere_in_the_name_and_docker_auth(self):
+        # Real cases (Nov 23), gitleaks' exact redacted matches that got NO note:
+        # test_keys keys:5 (the secret half of the AWS key on line 4), leaky-repo
+        # .bash_profile:12, web/ruby/secrets.yml:14 (Rails), .docker/.dockercfg:4
+        # (base64 user:password). The note only matched names ENDING in secret.
+        for match in ('aws_secret_access_key = REDACTED', 'AWS_SECRET_ACCESS_KEY=REDACTED',
+                      'secret_key_base: REDACTED'):
+            self.assertEqual(plainsec.name_hint(match), plainsec.secret_name_hint("secret"), match)
+        self.assertEqual(plainsec.name_hint('auth": "REDACTED"'),
+                         plainsec.secret_name_hint("login (user name and password)"))
+        # deliberately unchanged: an access key ID is half of a login, neither
+        # "check first, credential" nor "harmless" (leaky-repo cloud/.s3cfg:2)
+        self.assertEqual(plainsec.name_hint('access_key = REDACTED'), "")
+        # more specific notes still win
+        self.assertIn("hash", plainsec.name_hint('secret_hash: "REDACTED"'))
+        self.assertIn("an ID", plainsec.name_hint('secret_id = "REDACTED"'))
+        self.assertEqual(plainsec.name_hint('author: "REDACTED"'), "")      # not `auth`
+
     def test_name_hint_never_uses_the_value(self):
         # a hash-looking VALUE must not earn the "usually fine" hash note
         self.assertNotIn("hash", plainsec.name_hint('token = "sha256_looking_value"'))
