@@ -273,7 +273,51 @@ def scan_deps(folder, audit_env=False):
     return run_tool(cmd)
 
 
+NPM_LOCK_NAMES = {"package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml",
+                  "bun.lock", "bun.lockb"}
+
+
+def unlocked_package_jsons(folder, limit=20):
+    """package.json files that declare dependencies but have no lock file in their
+    folder or any parent folder (workspaces share the root's lock). osv-scanner
+    checks lock files only, so these are silently skipped. Real case
+    (bradtraversy/react_step_form): 6 dependencies, no lock, and the report said
+    "0 risky dependencies … nothing to check" (exit 0). With a lock: 35 risky."""
+    folder = Path(folder)
+    lock_dirs, found = set(), []
+    for dirpath, dirnames, filenames in os.walk(folder):
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+        if NPM_LOCK_NAMES & set(filenames):
+            lock_dirs.add(Path(dirpath))
+    for dirpath, dirnames, filenames in os.walk(folder):
+        dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
+        if "package.json" not in filenames:
+            continue
+        here = Path(dirpath)
+        if any(d == here or d in here.parents for d in lock_dirs):
+            continue
+        try:
+            pj = json.loads((here / "package.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(pj, dict) and any(isinstance(pj.get(k), dict) and pj[k] for k in
+                                        ("dependencies", "devDependencies", "optionalDependencies")):
+            found.append((here / "package.json").relative_to(folder).as_posix())
+            if len(found) >= limit:
+                break
+    return found
+
+
 def scan_deps_osv(folder):
+    data, err = _scan_deps_osv(folder)
+    if data is not None:
+        unlocked = unlocked_package_jsons(folder)
+        if unlocked:
+            data["unlocked_npm"] = unlocked
+    return data, err
+
+
+def _scan_deps_osv(folder):
     """osv-scanner v2: every dependency file in the project (requirements*.txt,
     pyproject/poetry/uv locks, Cargo.lock, package-lock.json, go.mod, ...).
     Exit 0 = clean, 1 = vulnerabilities, 128 = no dependency files at all."""
@@ -1629,8 +1673,9 @@ def where_lines(findings):
 
 
 def headline(shown, hidden, deps, skipped=None, deps_checked=True, secrets=None,
-             unsound=0, code_checked=True, n_invalid=0):
+             unsound=0, code_checked=True, n_invalid=0, deps_partly=False):
     """code_checked: True, False, or "partly" (bandit skipped some files).
+    deps_partly: some dependency files (an unlocked package.json) weren't checked.
     n_invalid: files that aren't valid Python (so not checked, and can't run)."""
     urgent = sum(1 for f in shown if f["severity"] in ("HIGH", "MEDIUM"))
     high = sum(1 for f in shown if f["severity"] == "HIGH")
@@ -1641,6 +1686,7 @@ def headline(shown, hidden, deps, skipped=None, deps_checked=True, secrets=None,
                 + (f" ({', '.join(x for x in [f'{serious} high/critical' if serious else '', f'{test_only} test-only' if test_only else ''] if x)})"
                    if serious or test_only else "")
                 + (f" + {unsound} unsound" if unsound else "")
+                + (" · some dependency files NOT CHECKED" if deps_partly else "")
                 if deps_checked else "dependencies NOT CHECKED")
     parts = []
     if secrets is not None:          # None = secrets feature not in this report
@@ -1698,7 +1744,8 @@ def build_report(name, code, deps, errors, show_all=False, skipped=None, unused=
                     if n.get("kind") != "unmaintained")
     head = headline(shown, hidden, deps, skipped, not deps_failed, secrets, n_unsound,
                     False if code_failed else "partly" if code_partly else True,
-                    0 if code_failed else n_invalid)
+                    0 if code_failed else n_invalid,
+                    deps_partly=bool((dep_info or {}).get("unlocked_npm")))
     if changes:
         head += " · " + changes_headline(changes)
     out = [f"# Security report: {name}", "", f"**{head}**", ""]
@@ -1941,8 +1988,11 @@ def render_deps(deps, failed, info, root=None):
     if any(d.get("severity") == "NO SCORE" for d in deps):
         out.append("\"No severity score\" means the advisory wasn't given a rating. It "
                    "doesn't mean harmless: read what it means and decide.")
+    for f in info.get("unlocked_npm") or []:
+        out.append("NOT CHECKED: " + unlocked_message([f], root))
     if not deps:
-        out.append("No known vulnerabilities in your dependencies.")
+        out.append("No known vulnerabilities in your dependencies."
+                   + (" (in the files that were checked)" if info.get("unlocked_npm") else ""))
     by_src = {}
     for d in deps:
         by_src.setdefault(d.get("source", "requirements.txt"), []).append(d)
@@ -2025,6 +2075,23 @@ def render_groups(findings):
         out.append("- Where:")
         out += where_lines(items)
     return out
+
+
+def unlocked_message(files, root):
+    """Why an unlocked package.json wasn't checked, and the command that fixes it
+    without installing anything (`--package-lock-only` writes only the lock;
+    verified on react_step_form: lock written, no node_modules)."""
+    parts = []
+    for f in files:
+        folder = str(Path(f).parent)
+        here = Path(root) / folder if root is not None else None
+        cd = f"cd {shell_path(here)} && " if here is not None else ""
+        where = "" if here is not None or folder in ("", ".") else f" in `{folder}`"
+        parts.append(f"`{f}` lists dependencies but has no lock file, so the exact versions "
+                     "aren't known and nothing in it was checked (osv-scanner checks lock "
+                     f"files). Make one without installing anything: `{cd}npm install "
+                     f"--package-lock-only`{where}, then run plainsec again.")
+    return " ".join(parts)
 
 
 def load_json(path):
@@ -2386,6 +2453,9 @@ def main(argv=None):
 def scan(folder, args, remote=None):
     """remote: set when folder is a temp copy of a repo address (see main)."""
     errors = []
+    # A URL scan's printed commands point at the reader's own copy (~/<repo>);
+    # the temp copy is deleted before anyone reads the report.
+    shown_root = Path.home() / remote["name"] if remote else folder
 
     if args.bandit_json:
         bandit_data, err = load_json(args.bandit_json), None
@@ -2460,6 +2530,16 @@ def scan(folder, args, remote=None):
         dep_info["file_by_file"] = (osv_data or {}).get("file_by_file")
         dep_info["no_deps_declared"] = (osv_data or {}).get("no_deps_declared")
         dep_info["not_checked_files"] = (osv_data or {}).get("not_checked_files")
+        unlocked = (osv_data or {}).get("unlocked_npm") or []
+        if unlocked:
+            msg = unlocked_message(unlocked, shown_root)
+            if dep_info["no_sources"] or not (osv_data or {}).get("results"):
+                # nothing else was checked: the whole section is NOT CHECKED,
+                # never "0 risky dependencies … nothing to check"
+                errors.append(f"dependency scan — {msg}")
+            else:
+                dep_info["unlocked_npm"] = unlocked
+                errors.append(f"some dependency files — {msg}")
     else:
         deps = parse_audit(audit_data)
     secrets = parse_gitleaks(secrets_data, root=folder)
@@ -2510,9 +2590,6 @@ def scan(folder, args, remote=None):
     skipped_ids = {id(f) for items in skipped.values() for f in items}
     hidden_ids = set() if args.all else {
         id(f) for f in code if f["in_test"] and f["id"] in NORMAL_IN_TESTS}
-    # A URL scan's printed commands point at the reader's own copy (~/<repo>);
-    # the temp copy is deleted before anyone reads the report.
-    shown_root = Path.home() / remote["name"] if remote else folder
     title = remote["shown"].split("://", 1)[-1] if remote else folder.resolve().name
     report = build_report(title, code, deps, errors,
                           show_all=args.all, skipped=skipped, unused=unused,

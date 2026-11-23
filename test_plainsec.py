@@ -2063,6 +2063,69 @@ class TestGoSnapshotFixes(unittest.TestCase):
         self.assertIn("go get github.com/gin-gonic/gin@v1.9.1`", plainsec.dep_how(d, root=Path.home() / "g"))
         self.assertEqual(plainsec.fix_text("1.0.0-alpha.1"), "1.0.0 or later (first fixed in pre-release 1.0.0-alpha.1)")
 
+
+class TestPackageJsonWithoutLock(unittest.TestCase):
+    """Real case (Nov 23, bradtraversy/react_step_form @ efa30af, 300 stars):
+    package.json lists 6 dependencies (react-scripts ^3.4.1, …) and there is no
+    lock file. plainsec said "0 risky dependencies" and "No dependency files
+    found, so there was nothing to check", exit 0: a false all-clear. After
+    `npm install --package-lock-only` the same repo showed "35 risky
+    dependencies (23 high/critical)"."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(); self.dir = Path(self.tmp.name)
+        self.state = tempfile.TemporaryDirectory()
+        self.env = mock.patch.dict(os.environ, {"PLAINSEC_STATE_DIR": self.state.name}); self.env.start()
+        (self.dir / "b.json").write_text('{"results": []}')
+        (self.dir / "g.json").write_text("[]")
+
+    def tearDown(self):
+        self.env.stop(); self.tmp.cleanup(); self.state.cleanup()
+
+    def pkg(self, folder, deps):
+        (self.dir / folder).mkdir(parents=True, exist_ok=True)
+        (self.dir / folder / "package.json").write_text(json.dumps({"name": "x", "dependencies": deps}))
+
+    def run_main(self, osv_code=128, osv_out=""):
+        out = io.StringIO()
+        real_which = plainsec.shutil.which
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()), \
+             mock.patch.object(plainsec.shutil, "which",
+                               side_effect=lambda t: "/usr/bin/osv-scanner" if t == "osv-scanner" else real_which(t)), \
+             mock.patch.object(plainsec.subprocess, "run",
+                               return_value=mock.Mock(returncode=osv_code, stdout=osv_out, stderr="")):
+            rc = plainsec.main([str(self.dir), "--bandit-json", str(self.dir / "b.json"),
+                                "--secrets-json", str(self.dir / "g.json")])
+        return rc, out.getvalue()
+
+    def test_only_an_unlocked_package_json_is_not_checked(self):
+        self.pkg(".", {"react": "^16.13.1", "react-scripts": "^3.4.1"})
+        rc, out = self.run_main()
+        self.assertEqual(rc, 1, "must not exit as clean")
+        self.assertIn("dependencies NOT CHECKED", out.splitlines()[2])
+        self.assertNotIn("0 risky dependencies", out)
+        self.assertNotIn("nothing to check", out)
+        self.assertIn("`package.json` lists dependencies but has no lock file", out)
+        self.assertIn(f"`cd {plainsec.shell_path(self.dir)} && npm install --package-lock-only`", out)
+
+    def test_unlocked_package_json_next_to_checked_files_is_named(self):
+        self.pkg("web", {"express": "4"})
+        (self.dir / "requirements.txt").write_text("flask==3.1.1\n")
+        rc, out = self.run_main(osv_code=0, osv_out=json.dumps({"results": [
+            {"source": {"path": str(self.dir / "requirements.txt"), "type": "lockfile"}, "packages": []}]}))
+        self.assertEqual(rc, 1)
+        deps = out.split("## 1.")[1].split("## 2.")[0]
+        self.assertIn("NOT CHECKED: `web/package.json` lists dependencies but has no lock file", deps)
+        self.assertIn("some dependency files NOT CHECKED", out.splitlines()[2])
+
+    def test_no_false_alarm(self):
+        self.pkg(".", {})                                   # nothing declared
+        self.pkg("locked", {"a": "1"}); (self.dir / "locked" / "package-lock.json").write_text("{}")
+        self.pkg("ws/packages/sub", {"b": "1"}); (self.dir / "ws" / "yarn.lock").write_text("")  # workspace root lock
+        self.assertEqual(plainsec.unlocked_package_jsons(self.dir), [])
+        self.pkg("nolock", {"c": "1"})
+        self.assertEqual(plainsec.unlocked_package_jsons(self.dir), ["nolock/package.json"])
+
 class TestRenderDepsNotes(unittest.TestCase):
     """The cargo notes are one if/elif; the NO SCORE note is its own if.
     v0.1.18 put the NO SCORE `if` between them, so `elif cargo_missing` hung
