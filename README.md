@@ -168,6 +168,8 @@ itself sends nothing anywhere. What does leave it:
 - **osv-scanner** looks up each dependency's **name and version** in the
   [osv.dev](https://osv.dev) database (pip-audit, the fallback, asks PyPI's). Not your code.
 - **`cargo tree`** may fetch crate metadata from crates.io to work out which crates ship.
+- **Commands the report suggests** go further only when you run them: `npm audit fix
+  --package-lock-only`, for example, sends your project's package list to npm's servers.
 - **URL scans** download the repository from wherever it's hosted, like a `git clone`.
 
 bandit and gitleaks work entirely offline, and secrets are never printed in the report.

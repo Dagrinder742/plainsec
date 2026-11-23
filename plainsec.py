@@ -836,9 +836,14 @@ def _dep_how(d, root=None):
             # packages; `npm install minimist@…` only adds a new top-level one.
             # `npm ls --package-lock-only` reads the lock, no install needed.
             loc = "" if folder in ("", ".") or cd is not None else f" in `{folder}`"
+            # npm audit fix: verified on NodeGoat (only package-lock.json changed, no
+            # node_modules; 131 → 82 risky on rescan). It sends the package list to npm.
             return (f"`{name}` isn't in your package.json: other packages pull it in. To see "
                     f"which, run `{cd or ''}npm ls {name} --package-lock-only`{loc}, then "
-                    "update those packages (the names right under your project)")
+                    "update those packages (the names right under your project). "
+                    f"`{cd or ''}npm audit fix --package-lock-only`{loc} updates the ones it "
+                    "safely can in package-lock.json without installing anything (it sends "
+                    "your package list to npm's servers)")
         return f"{where}`{cd or ''}npm install {name}@{to}`"
     if eco == "Go":
         after = go_after_release(to)

@@ -2025,6 +2025,11 @@ class TestNpmAdvice(unittest.TestCase):
         self.assertNotIn("npm install minimist", how)
         self.assertIn("isn't in your package.json", how)
         self.assertIn("`cd ~/NodeGoat && npm ls minimist --package-lock-only`", how)
+        # Verified Nov 23 on the NodeGoat clone (Termux npm 12.2.3): `npm audit fix
+        # --package-lock-only` changed only package-lock.json (no node_modules); a
+        # rescan went 131 → 82 risky (92 → 55 high/critical), minimist copies 12 → 7.
+        self.assertIn("`cd ~/NodeGoat && npm audit fix --package-lock-only`", how)
+        self.assertIn("sends your package list to npm's servers", how)
         # a package from package.json keeps the direct command
         d2 = dict(d, name="marked", version="0.3.5", fix_to="4.0.10", direct=True)
         self.assertIn("`cd ~/NodeGoat && npm install marked@4.0.10`", plainsec.dep_how(d2, root=root))
