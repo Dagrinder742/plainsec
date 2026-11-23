@@ -2135,9 +2135,28 @@ class TestPackageJsonWithoutLock(unittest.TestCase):
         self.pkg(".", {})                                   # nothing declared
         self.pkg("locked", {"a": "1"}); (self.dir / "locked" / "package-lock.json").write_text("{}")
         self.pkg("ws/packages/sub", {"b": "1"}); (self.dir / "ws" / "yarn.lock").write_text("")  # workspace root lock
+        (self.dir / "ws" / "package.json").write_text(json.dumps({"workspaces": ["packages/*"]}))
+        self.pkg("pn/apps/web", {"d": "1"}); (self.dir / "pn" / "pnpm-lock.yaml").write_text("")
+        (self.dir / "pn" / "pnpm-workspace.yaml").write_text("packages:\n  - 'apps/*'\n")
+        self.pkg("obj/libs/x", {"e": "1"}); (self.dir / "obj" / "package-lock.json").write_text("{}")
+        (self.dir / "obj" / "package.json").write_text(json.dumps({"workspaces": {"packages": ["libs/x"]}}))
         self.assertEqual(plainsec.unlocked_package_jsons(self.dir), [])
         self.pkg("nolock", {"c": "1"})
         self.assertEqual(plainsec.unlocked_package_jsons(self.dir), ["nolock/package.json"])
+
+    def test_parent_lock_without_workspaces_does_not_cover_a_subfolder(self):
+        # Real case (Nov 23, ahkong0429/LipStickFighting @ 7f0e4a6): package-lock.json at
+        # the top (lockfile v1, 0 of server's packages in it), server/package.json with
+        # 31 dependencies (express, body-parser, cheerio…), no workspaces. The report said
+        # "every dependency file in the project" and never named server/package.json.
+        (self.dir / "package.json").write_text(json.dumps({"dependencies": {"a": "1"}}))
+        (self.dir / "package-lock.json").write_text("{}")
+        self.pkg("server", {"express": "^4.16.4", "body-parser": "^1.18.3"})
+        self.assertEqual(plainsec.unlocked_package_jsons(self.dir), ["server/package.json"])
+        # declaring it as a workspace makes the root lock count
+        (self.dir / "package.json").write_text(json.dumps({"dependencies": {"a": "1"},
+                                                            "workspaces": ["server"]}))
+        self.assertEqual(plainsec.unlocked_package_jsons(self.dir), [])
 
 class TestRenderDepsNotes(unittest.TestCase):
     """The cargo notes are one if/elif; the NO SCORE note is its own if.

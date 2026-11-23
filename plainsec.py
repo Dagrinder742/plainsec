@@ -277,9 +277,46 @@ NPM_LOCK_NAMES = {"package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm
                   "bun.lock", "bun.lockb"}
 
 
+def workspace_patterns(folder):
+    """Workspace globs a folder declares: package.json "workspaces" (a list, or
+    {"packages": [...]}) and pnpm-workspace.yaml "packages:" items."""
+    pats = []
+    try:
+        ws = json.loads((Path(folder) / "package.json").read_text(encoding="utf-8")).get("workspaces")
+    except (OSError, ValueError, AttributeError):
+        ws = None
+    if isinstance(ws, dict):
+        ws = ws.get("packages")
+    if isinstance(ws, list):
+        pats += [w for w in ws if isinstance(w, str)]
+    try:
+        in_list = False
+        for line in (Path(folder) / "pnpm-workspace.yaml").read_text(encoding="utf-8").splitlines():
+            if re.match(r"^packages\s*:", line):
+                in_list = True
+            elif in_list and re.match(r"^\s*-\s*", line):
+                pats.append(re.sub(r"^\s*-\s*", "", line).strip().strip("'\""))
+            elif in_list and line.strip() and not line.startswith((" ", "\t")):
+                in_list = False
+    except OSError:
+        pass
+    return [p.strip().lstrip("./").rstrip("/") for p in pats if p.strip()]
+
+
+def covered_by_workspace(lock_dir, here):
+    """A parent's lock covers `here` only if that parent declares it a workspace.
+    Real case (LipStickFighting): a root package-lock.json without workspaces held
+    none of server/package.json's 31 dependencies."""
+    rel = here.relative_to(lock_dir).as_posix()
+    pats = workspace_patterns(lock_dir)
+    if any(fnmatch.fnmatch(rel, p[1:].lstrip("./")) for p in pats if p.startswith("!")):
+        return False
+    return any(fnmatch.fnmatch(rel, p) for p in pats if not p.startswith("!"))
+
+
 def unlocked_package_jsons(folder, limit=20):
     """package.json files that declare dependencies but have no lock file in their
-    folder or any parent folder (workspaces share the root's lock). osv-scanner
+    folder, and aren't a workspace of a parent folder that has one. osv-scanner
     checks lock files only, so these are silently skipped. Real case
     (bradtraversy/react_step_form): 6 dependencies, no lock, and the report said
     "0 risky dependencies … nothing to check" (exit 0). With a lock: 35 risky."""
@@ -294,7 +331,8 @@ def unlocked_package_jsons(folder, limit=20):
         if "package.json" not in filenames:
             continue
         here = Path(dirpath)
-        if any(d == here or d in here.parents for d in lock_dirs):
+        if here in lock_dirs or any(d in here.parents and covered_by_workspace(d, here)
+                                    for d in lock_dirs):
             continue
         try:
             pj = json.loads((here / "package.json").read_text(encoding="utf-8"))
