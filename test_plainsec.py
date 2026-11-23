@@ -1765,6 +1765,21 @@ class TestRepoUrl(unittest.TestCase):
             self.assertIn("Removed 1 temporary copy left by earlier scans", err.getvalue())
             self.assertEqual(os.listdir(tmp), [])
 
+    def test_network_failure_gets_no_private_repo_hint(self):
+        # Real case (Nov 23, first run of extremely-vulnerable-flask-app): the phone
+        # was offline. The plain reason was right, but it was followed by "Check the
+        # address. If the repository is private, git needs your login…".
+        real = ("no internet connection, or the server name is misspelled (git said: fatal: "
+                "unable to access 'https://github.com/demo/app/': Could not resolve host: github.com)")
+        rc, out, err, dest = self.run_url("https://github.com/demo/app", {}, clone_error=real)
+        self.assertEqual(rc, 2)
+        self.assertIn("no internet connection", err)
+        self.assertNotIn("private", err)
+        # a missing or private repo still gets the hint
+        rc, out, err, dest = self.run_url("https://github.com/demo/zz", {},
+                                          clone_error="the repository doesn't exist, or it's private")
+        self.assertIn("git@… address", err)
+
     def test_remove_tree_handles_read_only_files(self):
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp, "copy", "objects")

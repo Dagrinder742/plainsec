@@ -2367,7 +2367,11 @@ def main(argv=None):
         dest = Path(tmp) / remote["name"]
         commit, branch, err = clone_repo(remote, dest)
         if err:
-            print(f"plainsec: couldn't download {remote['shown']}: {err}\n{CLONE_HINT}",
+            # Real case: offline phone ("Could not resolve host") also got the
+            # private-repository hint. That hint only helps a not-found / login error.
+            offline = err.startswith("no internet connection")
+            print(f"plainsec: couldn't download {remote['shown']}: {err}"
+                  + ("" if offline else f"\n{CLONE_HINT}"),
                   file=sys.stderr)
             return 2
         remote.update(commit=commit, branch=branch, settings=repo_settings(dest))
