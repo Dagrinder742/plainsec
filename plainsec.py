@@ -442,6 +442,10 @@ def parse_osv(data, root=None):
     bundles them, so we count groups. Rust 'unmaintained' notices are
     informational, not vulnerabilities, so they're kept apart."""
     risky, notices = [], []
+    # Real case (extremely-vulnerable-flask-app, osv-scanner 2.4.0): requirements.txt
+    # came back twice (type "lockfile", then "unknown") and werkzeug was listed and
+    # counted twice. One entry per package per file.
+    seen = set()
     for res in (data or {}).get("results", []) or []:
         src = (res.get("source") or {}).get("path", "?")
         if root:
@@ -452,6 +456,9 @@ def parse_osv(data, root=None):
         for pkg in res.get("packages", []) or []:
             p = pkg.get("package") or {}
             name, version, eco = p.get("name", "?"), p.get("version", "?"), p.get("ecosystem", "?")
+            if (src, eco, name, version) in seen:
+                continue
+            seen.add((src, eco, name, version))
             by_id = {v.get("id"): v for v in pkg.get("vulnerabilities", []) or []}
             groups = pkg.get("groups") or [
                 {"ids": [i], "aliases": v.get("aliases", []), "max_severity": ""}

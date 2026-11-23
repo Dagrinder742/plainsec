@@ -1923,6 +1923,26 @@ class TestPipAdvice(unittest.TestCase):
         self.assertIn("inside the project's virtual environment", how)
         self.assertIn("`pip install 'flask>=3.1.3'`", how)
 
+
+class TestOsvDuplicates(unittest.TestCase):
+    def test_same_file_reported_twice_is_listed_once(self):
+        # Real case (Nov 23, extremely-vulnerable-flask-app, osv-scanner 2.4.0):
+        # results held requirements.txt twice (type "lockfile", then "unknown"),
+        # the second with werkzeug 3.1.5 again. The report listed werkzeug twice
+        # and counted "4 risky dependencies" for 3 packages.
+        vuln = {"id": "GHSA-29vq-49wr-vm6x", "summary": "Werkzeug safe_join() allows Windows special device names",
+                "affected": [{"ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "3.1.6"}]}]}]}
+        pkg = {"package": {"name": "werkzeug", "version": "3.1.5", "ecosystem": "PyPI"},
+               "vulnerabilities": [vuln], "groups": [{"ids": ["GHSA-29vq-49wr-vm6x"], "max_severity": "5.5"}]}
+        data = {"results": [{"source": {"path": "/r/requirements.txt", "type": "lockfile"}, "packages": [pkg]},
+                            {"source": {"path": "/r/requirements.txt", "type": "unknown"}, "packages": [pkg]}]}
+        risky, notices = plainsec.parse_osv(data, root="/r")
+        self.assertEqual([(d["name"], d["version"], d["source"]) for d in risky],
+                         [("werkzeug", "3.1.5", "requirements.txt")])
+        # a different file with the same package is still its own entry
+        data["results"][1]["source"]["path"] = "/r/sub/requirements.txt"
+        self.assertEqual(len(plainsec.parse_osv(data, root="/r")[0]), 2)
+
 class TestRenderDepsNotes(unittest.TestCase):
     """The cargo notes are one if/elif; the NO SCORE note is its own if.
     v0.1.18 put the NO SCORE `if` between them, so `elif cargo_missing` hung
