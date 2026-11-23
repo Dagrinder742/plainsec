@@ -1054,7 +1054,9 @@ _SECRET_NAMES = (
 
 
 def secret_name_hint(kind):
-    return (f"the name says it's a {kind}: a working credential unless it's a "
+    # "an API key", not "a API key" (real case: leaky-repo cloud/.tugboat:4)
+    article = "an" if kind[:1].lower() in "aeiou" else "a"
+    return (f"the name says it's {article} {kind}: a working credential unless it's a "
             "placeholder or test value, so check this one first")
 
 

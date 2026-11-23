@@ -671,6 +671,14 @@ class TestSecrets(unittest.TestCase):
         self.assertIn("**2 possible secrets (1 named like IDs/hashes)", out)
         self.assertIn("half of a login", out)
 
+    def test_api_key_note_says_an(self):
+        # Real case (Nov 23, leaky-repo cloud/.tugboat:4 `api_key: …`): the note
+        # read "the name says it's a API key".
+        note = plainsec.name_hint('api_key: "REDACTED"')
+        self.assertIn("it's an API key:", note)
+        self.assertNotIn("a API key", note)
+        self.assertIn("it's a token:", plainsec.name_hint('oauth_token: "REDACTED"'))
+
     def test_name_hint_never_uses_the_value(self):
         # a hash-looking VALUE must not earn the "usually fine" hash note
         self.assertNotIn("hash", plainsec.name_hint('token = "sha256_looking_value"'))
