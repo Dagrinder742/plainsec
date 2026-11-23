@@ -657,8 +657,10 @@ def _dep_how(d, root=None):
         return ("no fixed version yet; consider an alternative package, or watch "
                 "for an update.")
     if eco == "PyPI":
-        return (f"`pip install '{name}>={to}'`, then update its pin in "
-                f"`{shown_source}`")
+        # Real case (extremely-vulnerable-flask-app): pasted from ~ on Ubuntu, the bare
+        # command was refused ("externally-managed-environment"); in a venv it worked.
+        return (f"inside the project's virtual environment, run `pip install '{name}>={to}'`, "
+                f"then update its pin in `{shown_source}`")
     if eco == "crates.io":
         target = stable_of(to)
         loc = "" if folder in ("", ".") or cd is not None else f" in `{folder}`"

@@ -1911,6 +1911,18 @@ class TestBanditUnread(unittest.TestCase):
 
 
 
+
+class TestPipAdvice(unittest.TestCase):
+    def test_pip_install_says_inside_the_project_venv(self):
+        # Real case (Nov 23, extremely-vulnerable-flask-app requirements.txt): the
+        # printed `pip install 'flask>=3.1.3'`, pasted from ~ on Ubuntu, was refused
+        # ("externally-managed-environment"). In a venv it worked. It belongs there.
+        d = {"name": "flask", "version": "3.1.1", "fix_to": "3.1.3", "ecosystem": "PyPI",
+             "source": "requirements.txt"}
+        how = plainsec.dep_how(d, root=Path.home() / "demo-app")
+        self.assertIn("inside the project's virtual environment", how)
+        self.assertIn("`pip install 'flask>=3.1.3'`", how)
+
 class TestRenderDepsNotes(unittest.TestCase):
     """The cargo notes are one if/elif; the NO SCORE note is its own if.
     v0.1.18 put the NO SCORE `if` between them, so `elif cargo_missing` hung
