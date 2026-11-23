@@ -526,6 +526,21 @@ def fix_text(v):
     return f"{v} or later"
 
 
+def npm_direct_deps(root, source):
+    """Names in the package.json next to an npm lock file (every dependency
+    list), or None if there's no readable package.json there."""
+    base = (Path(root) / source).parent if root else Path(source).parent
+    try:
+        data = json.loads((base / "package.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    names = set()
+    for key in ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies"):
+        if isinstance(data.get(key), dict):
+            names.update(data[key])
+    return names
+
+
 def semver_compatible(current, target):
     """Would `cargo update` reach target without a Cargo.toml change?
     Cargo's rule: same major (>=1), or same minor for 0.x."""
@@ -705,6 +720,14 @@ def _dep_how(d, root=None):
                 "update that crate instead" + (" (here that's usually one of your solana / anchor crates)"
                                    if d.get("solana") else ""))
     if eco == "npm":
+        if d.get("direct") is False:
+            # Real case (NodeGoat): minimist had 12 copies, 11 nested under other
+            # packages; `npm install minimist@…` only adds a new top-level one.
+            # `npm ls --package-lock-only` reads the lock, no install needed.
+            loc = "" if folder in ("", ".") or cd is not None else f" in `{folder}`"
+            return (f"`{name}` isn't in your package.json: other packages pull it in. To see "
+                    f"which, run `{cd or ''}npm ls {name} --package-lock-only`{loc}, then "
+                    "update those packages (the names right under your project)")
         return f"{where}`{cd or ''}npm install {name}@{to}`"
     if eco == "Go":
         return f"{where}`{cd or ''}go get {name}@v{to}`"
@@ -2378,7 +2401,14 @@ def scan(folder, args, remote=None):
     if dep_info["tool"] == "osv-scanner":
         deps, dep_info["notices"] = parse_osv(osv_data, root=folder)
         cargo_cache, ship_cache = {}, {}
+        npm_cache = {}
         for d in deps + dep_info["notices"]:
+            if d["ecosystem"] == "npm":
+                src = d["source"]
+                if src not in npm_cache:
+                    npm_cache[src] = npm_direct_deps(folder, src)
+                if npm_cache[src] is not None:
+                    d["direct"] = d["name"] in npm_cache[src]
             if d["ecosystem"] == "crates.io":
                 src = d["source"]
                 if src not in cargo_cache:

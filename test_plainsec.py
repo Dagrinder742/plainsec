@@ -1982,6 +1982,38 @@ class TestIssueSummary(unittest.TestCase):
         # a plain advisory gets no "disputed" remark
         self.assertNotIn("disputed", plainsec.issue_summary([{"id": "X", "details": "Allows a crash."}]))
 
+
+class TestNpmAdvice(unittest.TestCase):
+    def test_package_not_in_package_json_gets_npm_ls_not_npm_install(self):
+        # Real case (Nov 23, OWASP NodeGoat package-lock.json): 131 entries, only 9 of
+        # them packages from package.json. Every one said `npm install <name>@<ver>`.
+        # For minimist (12 copies, 11 nested under other packages) that adds a new
+        # top-level dependency and leaves the nested copies; the report even printed
+        # both `npm install minimist@0.2.4` and `npm install minimist@1.2.6`.
+        root = Path.home() / "NodeGoat"
+        d = {"name": "minimist", "version": "0.0.8", "fix_to": "0.2.4", "ecosystem": "npm",
+             "source": "package-lock.json", "direct": False}
+        how = plainsec.dep_how(d, root=root)
+        self.assertNotIn("npm install minimist", how)
+        self.assertIn("isn't in your package.json", how)
+        self.assertIn("`cd ~/NodeGoat && npm ls minimist --package-lock-only`", how)
+        # a package from package.json keeps the direct command
+        d2 = dict(d, name="marked", version="0.3.5", fix_to="4.0.10", direct=True)
+        self.assertIn("`cd ~/NodeGoat && npm install marked@4.0.10`", plainsec.dep_how(d2, root=root))
+        # unknown (no package.json found): the old wording, nothing claimed
+        d3 = dict(d); d3.pop("direct")
+        self.assertIn("npm install minimist@0.2.4", plainsec.dep_how(d3, root=root))
+
+    def test_npm_direct_deps_reads_every_dependency_list(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "web").mkdir()
+            Path(tmp, "web", "package.json").write_text(json.dumps({
+                "dependencies": {"express": "4"}, "devDependencies": {"grunt": "1"},
+                "optionalDependencies": {"fsevents": "1"}, "peerDependencies": {"react": "18"}}))
+            self.assertEqual(plainsec.npm_direct_deps(tmp, "web/package-lock.json"),
+                             {"express", "grunt", "fsevents", "react"})
+            self.assertIsNone(plainsec.npm_direct_deps(tmp, "other/package-lock.json"))
+
 class TestRenderDepsNotes(unittest.TestCase):
     """The cargo notes are one if/elif; the NO SCORE note is its own if.
     v0.1.18 put the NO SCORE `if` between them, so `elif cargo_missing` hung
