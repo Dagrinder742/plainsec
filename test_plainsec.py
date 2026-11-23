@@ -1938,6 +1938,19 @@ class TestPipAdvice(unittest.TestCase):
         self.assertIn("inside the project's virtual environment", how)
         self.assertIn("`pip install 'flask>=3.1.3'`", how)
 
+    def test_pip_advice_says_how_to_make_the_venv(self):
+        # Verified Nov 23 (proot Ubuntu, Python 3.14): pasted as printed,
+        # `cd ~/…flask-app && python3 -m venv .venv && . .venv/bin/activate` then the
+        # pip install worked (flask 3.1.3). Ubuntu marks its Python EXTERNALLY-MANAGED
+        # (plain pip refused); without python3-venv its venv says
+        # `apt install python3.14-venv`. Termux has no such marker: plain pip works.
+        d = {"name": "flask", "version": "3.1.1", "fix_to": "3.1.3", "ecosystem": "PyPI",
+             "source": "requirements.txt"}
+        how = plainsec.dep_how(d, root=Path.home() / "demo-app")
+        self.assertIn("`cd ~/demo-app && python3 -m venv .venv && . .venv/bin/activate`", how)
+        self.assertIn("`sudo apt install python3-venv`", how)
+        self.assertIn("Termux", how)
+
 
 class TestOsvDuplicates(unittest.TestCase):
     def test_same_file_reported_twice_is_listed_once(self):

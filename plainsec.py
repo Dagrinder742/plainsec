@@ -757,8 +757,16 @@ def _dep_how(d, root=None):
     if eco == "PyPI":
         # Real case (extremely-vulnerable-flask-app): pasted from ~ on Ubuntu, the bare
         # command was refused ("externally-managed-environment"); in a venv it worked.
+        # How to make that venv, from what actually happens (Nov 23): Ubuntu's Python
+        # is EXTERNALLY-MANAGED (plain pip refused) and its venv needs python3-venv
+        # (it says `apt install python3.14-venv`); Termux has no marker, plain pip works.
+        make = (f"`{cd}python3 -m venv .venv && . .venv/bin/activate`" if cd is not None
+                else "`python3 -m venv .venv && . .venv/bin/activate` in the project folder")
         return (f"inside the project's virtual environment, run `pip install '{name}>={to}'`, "
-                f"then update its pin in `{shown_source}`")
+                f"then update its pin in `{shown_source}`. No virtual environment yet? "
+                f"{make} makes one and turns it on (Ubuntu/Debian: if that fails, run "
+                "`sudo apt install python3-venv` first; on Termux a plain `pip install` "
+                "works too)")
     if eco == "crates.io":
         target = stable_of(to)
         loc = "" if folder in ("", ".") or cd is not None else f" in `{folder}`"
