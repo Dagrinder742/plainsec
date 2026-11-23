@@ -17,7 +17,7 @@ output overwhelming.
 ## Before and after
 
 A real Solana project (names changed): one Rust `Cargo.lock`. osv-scanner, on its own,
-flags **23 crates** with **40 advisory IDs**. plainsec's headline for the same file:
+flags **23 crate versions** with **40 advisory IDs**. plainsec's headline for the same file:
 
 ```
 8 risky dependencies (1 high/critical, 7 test-only) + 6 unsound
@@ -46,7 +46,7 @@ These come in only through dev-dependencies, so they aren't built into your prog
 ### Unmaintained (12): not vulnerabilities
 ```
 
-Of the 14 crates with a real problem (8 vulnerable + 6 unsound), **only 2 are built into
+Of the 14 crate versions with a real problem (8 vulnerable + 6 unsound), **only 2 are built into
 the program** (borsh and rand), and neither has a severity score. The other 12 come in
 only through dev-dependencies (`solana-program-test`, `solana-sdk`). Getting to that answer by hand
 takes an afternoon with `cargo tree`.
