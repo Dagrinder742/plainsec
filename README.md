@@ -81,6 +81,9 @@ in (an SSH key, or a saved login); plainsec never asks for a password.
   plain files, and the repository's own scanner settings (`bandit.yaml`,
   `.gitleaks.toml`, `osv-scanner.toml`, `.plainsec`) are named in the report, because they
   can switch checks off.
+- The temporary copy is deleted even when the scan is stopped (Ctrl-C, `kill`, or closing
+  the terminal). If it was stopped too hard for that (`kill -9`, power loss), the next URL
+  scan removes the leftover, but only once the scan that made it is no longer running.
 
 Useful options:
 

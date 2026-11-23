@@ -1568,10 +1568,13 @@ class TestRepoUrl(unittest.TestCase):
             a = Path(tmp, "a.json"); a.write_text('{"dependencies": []}')
             g = Path(tmp, "g.json"); g.write_text(json.dumps(list(leaks)))
             out, err = io.StringIO(), io.StringIO()
+            temp = Path(tmp, "temp"); temp.mkdir()   # never the real temp folder
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
-                 mock.patch.object(plainsec, "clone_repo", fake_clone):
+                 mock.patch.object(plainsec, "clone_repo", fake_clone), \
+                 mock.patch.object(tempfile, "tempdir", str(temp)):
                 rc = plainsec.main([url, "--bandit-json", str(b), "--audit-json", str(a),
                                     "--secrets-json", str(g), *extra])
+            self.assertEqual(list(temp.iterdir()), [], "temp copy must be deleted")
         return rc, out.getvalue(), err.getvalue(), seen.get("dest")
 
     def test_url_scan_end_to_end(self):
@@ -1607,6 +1610,87 @@ class TestRepoUrl(unittest.TestCase):
         self.assertIn("couldn't download https://github.com/demo/zz: the repository doesn't exist", err)
         self.assertIn("git@… address", err)
         self.assertFalse(dest.parent.exists())
+
+    @unittest.skipIf(os.name == "nt", "POSIX signals")
+    def test_kill_or_closed_terminal_still_deletes_the_copy(self):
+        # Real case (Nov 23): a scan stopped by a time limit left 122 MB in
+        # Termux's tmp. Here a real child process gets the signal mid-scan.
+        import signal, sys, time
+        child = (
+            "import sys, time, pathlib, plainsec\n"
+            "def clone(info, dest):\n"
+            "    dest.mkdir(parents=True); (dest / 'big.bin').write_bytes(b'x' * 1000)\n"
+            "    pathlib.Path(sys.argv[1]).write_text('ready')\n"
+            "    time.sleep(60)\n"
+            "plainsec.clone_repo = clone\n"
+            "sys.exit(plainsec.main(['https://github.com/demo/app']))\n")
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            with tempfile.TemporaryDirectory() as tmp:
+                temp, ready = Path(tmp, "temp"), Path(tmp, "ready")
+                temp.mkdir()
+                env = dict(os.environ, TMPDIR=str(temp),
+                           PYTHONPATH=str(Path(plainsec.__file__).parent))
+                p = subprocess.Popen([sys.executable, "-c", child, str(ready)], env=env,
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                for _ in range(200):
+                    if ready.exists():
+                        break
+                    time.sleep(0.05)
+                self.assertTrue(ready.exists(), "child never reached the download")
+                self.assertEqual(len(list(temp.iterdir())), 1)       # the copy exists
+                p.send_signal(sig)
+                self.assertEqual(p.wait(timeout=20), 128 + sig, sig)
+                self.assertEqual(list(temp.iterdir()), [], f"copy left after {sig!r}")
+
+    def test_sweep_removes_only_copies_whose_scan_is_gone(self):
+        import time
+        now = time.time()
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            def copy(name, pid=None, age=0):
+                d = base / name
+                d.mkdir()
+                (d / "repo").mkdir()
+                if pid is not None:
+                    (d / plainsec.OWNER_FILE).write_text(str(pid))
+                os.utime(d, (now - age, now - age))
+                return d
+            done = subprocess.Popen(["true"]); done.wait()            # a pid that has ended
+            dead = copy("plainsec-dead0000", done.pid)
+            live = copy("plainsec-live0000", os.getpid())             # a scan still running
+            fresh = copy("plainsec-fresh000")                          # made before the owner file
+            old = copy("plainsec-old00000", age=2 * 86400)            # pre-v0.2.2 leftover
+            reused = copy("plainsec-reused00", os.getpid(), age=2 * 86400)
+            other = copy("plainsec-notmine-but-long")                  # not mkdtemp's shape
+            target = base / "elsewhere"; target.mkdir()
+            os.symlink(target, base / "plainsec-link0000")
+            n = plainsec.sweep_leftover_copies(base, now)
+            self.assertFalse(dead.exists())
+            self.assertFalse(old.exists())
+            self.assertFalse(reused.exists())          # pid may be reused; no scan takes a day
+            self.assertTrue(live.exists())
+            self.assertTrue(fresh.exists())
+            self.assertTrue(other.exists())
+            self.assertTrue(target.exists() and (base / "plainsec-link0000").is_symlink())
+            self.assertEqual(n, 3)
+
+    def test_url_scan_sweeps_and_marks_its_copy(self):
+        seen = {}
+        def fake_clone(info, dest):
+            seen["owner"] = (dest.parent / plainsec.OWNER_FILE).read_text()
+            return None, None, "the repository doesn't exist, or it's private"
+        with tempfile.TemporaryDirectory() as tmp:
+            stale = Path(tmp, "plainsec-stale000"); stale.mkdir()
+            os.utime(stale, (0, 0))
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err), \
+                 mock.patch.object(plainsec, "clone_repo", fake_clone), \
+                 mock.patch.object(tempfile, "tempdir", tmp):
+                plainsec.main(["https://github.com/demo/app"])
+            self.assertEqual(seen["owner"], str(os.getpid()))
+            self.assertFalse(stale.exists())
+            self.assertIn("Removed 1 temporary copy left by earlier scans", err.getvalue())
+            self.assertEqual(os.listdir(tmp), [])
 
     def test_remove_tree_handles_read_only_files(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -2070,6 +2070,93 @@ CLONE_HINT = ("Check the address. If the repository is private, git needs your l
               "yourself (`git clone …`) and scan the folder.")
 
 
+TEMP_PREFIX = "plainsec-"
+OWNER_FILE = ".plainsec-owner"           # holds the pid of the scan using the copy
+_TEMP_NAME = re.compile(r"^plainsec-[A-Za-z0-9_]{8}$")    # mkdtemp's 8 random characters
+STALE_SECONDS = 24 * 3600
+
+
+def exit_on_termination():
+    """Turn SIGTERM (`kill`) and SIGHUP (terminal / Termux session closed)
+    into a normal exit, so the temp copy's `finally` cleanup runs. Python's
+    default ends without it: a scan stopped this way (Nov 23) left 122 MB in
+    Termux's tmp. Ctrl-C already ran it. -> a function that puts the old
+    handlers back."""
+    import signal
+    def stop(signum, frame):
+        raise SystemExit(128 + signum)
+    old = {}
+    for name in ("SIGTERM", "SIGHUP"):
+        sig = getattr(signal, name, None)
+        if sig is None:                   # no SIGHUP on Windows
+            continue
+        try:
+            old[sig] = signal.signal(sig, stop)
+        except (ValueError, OSError):     # not the main thread
+            pass
+    def restore():
+        for sig, handler in old.items():
+            try:
+                signal.signal(sig, handler)
+            except (ValueError, OSError):
+                pass
+    return restore
+
+
+def _pid_alive(pid):
+    """None when it can't be told safely. On Windows os.kill(pid, 0) would
+    END that process, so it's never called there."""
+    if os.name == "nt":
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:                       # exists, owned by someone else
+        return True
+    return True
+
+
+def sweep_leftover_copies(base=None, now=None):
+    """Delete temp copies whose scan was killed too hard for any cleanup to
+    run (kill -9, power loss). A copy is removed only when the scan that made
+    it is gone: its owner pid isn't running, or it's over a day old (no owner
+    file, made before v0.2.2, or no safe way to check the pid, as on Windows).
+    So two scans running at once never delete each other's copy. Only
+    plainsec-XXXXXXXX folders that are real folders (not links) and yours.
+    -> how many were removed."""
+    import time
+    base = Path(base or tempfile.gettempdir())
+    now = time.time() if now is None else now
+    removed = 0
+    try:
+        entries = list(base.iterdir())
+    except OSError:
+        return 0
+    for d in entries:
+        if not _TEMP_NAME.match(d.name):
+            continue
+        try:
+            st = os.lstat(d)
+        except OSError:
+            continue
+        if not stat.S_ISDIR(st.st_mode):              # a link is never followed
+            continue
+        if hasattr(os, "getuid") and st.st_uid != os.getuid():
+            continue
+        try:
+            pid = int((d / OWNER_FILE).read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            pid = None
+        # Over a day old counts as gone even if its pid runs: the pid may have
+        # been reused by another program, and no scan takes a day.
+        gone = (now - st.st_mtime > STALE_SECONDS or
+                (pid is not None and _pid_alive(pid) is False))
+        if gone and remove_tree(d):
+            removed += 1
+    return removed
+
+
 def remove_tree(path):
     """Delete the temp copy. git makes some files read-only (on Windows that
     stops rmtree), so those are made writable and tried again."""
@@ -2135,9 +2222,15 @@ def main(argv=None):
               "address (like https://github.com/owner/repo) or an SSH one "
               "(git@github.com:owner/repo).", file=sys.stderr)
         return 2
+    swept = sweep_leftover_copies()
+    if swept:
+        print(f"Removed {swept} temporary cop{'y' if swept == 1 else 'ies'} left by "
+              "earlier scans that were stopped.", file=sys.stderr)
     print(f"Downloading {remote['shown']} with its full history (old commits are "
           "checked for secrets too)…", file=sys.stderr)
-    tmp = tempfile.mkdtemp(prefix="plainsec-")
+    tmp = tempfile.mkdtemp(prefix=TEMP_PREFIX)
+    (Path(tmp) / OWNER_FILE).write_text(str(os.getpid()), encoding="utf-8")
+    restore = exit_on_termination()
     try:
         dest = Path(tmp) / remote["name"]
         commit, branch, err = clone_repo(remote, dest)
@@ -2151,6 +2244,7 @@ def main(argv=None):
         if not remove_tree(tmp):
             print(f"Note: couldn't fully delete the temporary copy at {tmp}; "
                   "you can delete that folder yourself.", file=sys.stderr)
+        restore()
 
 
 def scan(folder, args, remote=None):
