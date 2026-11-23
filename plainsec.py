@@ -2007,7 +2007,11 @@ def render_deps(deps, failed, info, root=None):
             out.append("NOT checked (osv-scanner can't take these one by one): "
                        + ", ".join(f"`{f}`" for f in info["not_checked_files"]))
     elif info.get("tool") == "osv-scanner":
-        out.append("Checked with osv-scanner: every dependency file in the project.")
+        # Real case (LipStickFighting): "every dependency file" sat right above
+        # "NOT CHECKED: server/package.json".
+        out.append("Checked with osv-scanner: every dependency file in the project"
+                   + (", except the ones marked NOT CHECKED below." if info.get("unlocked_npm")
+                      else "."))
         if info.get("no_deps_declared"):
             return out + [", ".join(f"`{f}`" for f in info["no_deps_declared"])
                           + " declares no dependencies, so there was nothing to check.", ""]

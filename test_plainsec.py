@@ -2133,6 +2133,11 @@ class TestPackageJsonWithoutLock(unittest.TestCase):
         # Real case (Nov 23, LipStickFighting rescan): the same sentence for
         # server/package.json appeared twice, as a top warning and in section 1.
         self.assertEqual(out.count("lists dependencies but has no lock file"), 1)
+        # Real case (LipStickFighting rescan): section 1 began "Checked with
+        # osv-scanner: every dependency file in the project." right above the
+        # NOT CHECKED line for server/package.json.
+        self.assertNotIn("every dependency file in the project.", deps)
+        self.assertIn("except the ones marked NOT CHECKED below", deps)
 
     def test_no_false_alarm(self):
         self.pkg(".", {})                                   # nothing declared
