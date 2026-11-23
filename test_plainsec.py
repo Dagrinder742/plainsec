@@ -1964,6 +1964,24 @@ class TestPlainTextForCommonChecks(unittest.TestCase):
             self.assertNotIn("Consider possible", f["meaning"])
             self.assertNotIn("bandit.readthedocs", f["fix"])
 
+
+class TestIssueSummary(unittest.TestCase):
+    def test_disputed_note_is_not_the_meaning(self):
+        # Real case (Nov 23, vulpy requirements.txt, pyjwt 2.9.0, PYSEC-2025-183 /
+        # CVE-2025-45768): no summary; the "meaning" shown was the NOTE sentence
+        # ("NOTE: this is disputed by the Supplier because…"), not the problem.
+        v = {"id": "PYSEC-2025-183", "details":
+             "pyjwt v2.10.1 was discovered to contain weak encryption. NOTE: this is disputed by "
+             "the Supplier because the key length is chosen by the application that uses the "
+             "library (admittedly, library users may benefit from a minimum value and a mechanism "
+             "for opting in to strict enforcement)."}
+        text = plainsec.issue_summary([v])
+        self.assertTrue(text.startswith("pyjwt v2.10.1 was discovered to contain weak encryption"), text)
+        self.assertNotIn("NOTE:", text)
+        self.assertIn("disputed", text)
+        # a plain advisory gets no "disputed" remark
+        self.assertNotIn("disputed", plainsec.issue_summary([{"id": "X", "details": "Allows a crash."}]))
+
 class TestRenderDepsNotes(unittest.TestCase):
     """The cargo notes are one if/elif; the NO SCORE note is its own if.
     v0.1.18 put the NO SCORE `if` between them, so `elif cargo_missing` hung

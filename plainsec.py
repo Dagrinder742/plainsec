@@ -985,7 +985,8 @@ _PROBLEM_WORDS = re.compile(
     r"vulnerab|attack|exploit|crash|denial|dos\b|inject|bypass|overflow|leak|spoof|"
     r"forg|unsound|panic|hang|exhaust|untrusted|malicious|unsafe|disclos|expos|"
     r"allow|could|can be|may |fail|improper|incorrect|insufficient|missing|race|"
-    r"redirect|traversal|smuggl|tamper|compromis|distrust|timing", re.I)
+    r"redirect|traversal|smuggl|tamper|compromis|distrust|timing|weak|discovered to contain",
+    re.I)
 
 
 def issue_summary(vs):
@@ -999,9 +1000,16 @@ def issue_summary(vs):
             return first_sentence(v["summary"])
     for v in vs:
         text = " ".join((v.get("details") or "").split())
+        # Real case (vulpy, pyjwt PYSEC-2025-183): the problem sentence ("…discovered
+        # to contain weak encryption.") didn't match, so the NOTE after it ("NOTE: this
+        # is disputed by the Supplier…") became the meaning. A NOTE is never the meaning.
+        disputed = " (disputed by the maintainers; see the advisory)" if re.search(
+            r"\bdisputed\b", text, re.I) else ""
         for sentence in re.split(r"(?<=[.!?])\s+", text)[:3]:
+            if re.match(r"\W*(NOTE\b|\*\*\s*DISPUTED)", sentence, re.I):
+                continue
             if _PROBLEM_WORDS.search(sentence):
-                return first_sentence(sentence)
+                return first_sentence(sentence) + disputed
     return ""
 
 
