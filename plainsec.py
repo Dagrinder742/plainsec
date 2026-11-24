@@ -231,10 +231,10 @@ INSTALL = {
     "gitleaks": ("finds leaked keys and passwords, including in old commits",
                  # not apt: Ubuntu's is 8.16.0, which missed a secret 8.30.1 finds
                  # (real case Nov 24, trinity_master: 2 vs 3 possible secrets)
-                 "download it from github.com/gitleaks/gitleaks/releases",
+                 "https://github.com/gitleaks/gitleaks/releases",
                  "pkg install golang && go install github.com/zricethezav/gitleaks/v8@latest"),
     "osv-scanner": ("checks every dependency file for known vulnerabilities",
-                    "download it from github.com/google/osv-scanner/releases",
+                    "https://github.com/google/osv-scanner/releases",
                     "pkg install golang && GOTOOLCHAIN=local go install github.com/google/osv-scanner/v2/cmd/osv-scanner@v2.4.0"),
     "bandit": ("checks your Python code for risky patterns",
                "pipx install bandit", "pip install bandit"),
@@ -243,15 +243,24 @@ INSTALL = {
 }
 
 
-def install_hint(tool):
+def install_how(tool):
+    """A command in backticks (pasteable), or for a download page plain text with
+    the full https:// link: backticks mean "paste this" (Stage 7.7)."""
     if tool not in INSTALL:
         return ""
     _, ubuntu, termux = INSTALL[tool]
     how = termux if on_termux() else ubuntu
+    if how.startswith("https://"):
+        return f"download it from {how}"
     extra = (" (Go programs are built on the phone, which takes a few minutes; they end "
              "up in `~/go/bin`, so add `export PATH=\"$HOME/go/bin:$PATH\"` to ~/.bashrc)"
              if on_termux() and "go install" in how else "")
-    return f"To install: `{how}`{extra}."
+    return f"`{how}`{extra}"
+
+
+def install_hint(tool):
+    how = install_how(tool)
+    return f"To install: {how}." if how else ""
 
 
 def missing_tool(tool):

@@ -1390,10 +1390,12 @@ class TestTermuxWording(unittest.TestCase):
         with mock.patch.dict(os.environ, {"PREFIX": ""}):
             # Real case (Nov 24): `sudo apt install gitleaks` gives 8.16.0, which missed
             # a secret 8.30.1 finds; point at the release instead, like osv-scanner.
-            hint = plainsec.install_hint("gitleaks")
-            self.assertIn("github.com/gitleaks/gitleaks/releases", hint)
-            self.assertNotIn("apt install", hint)
-            self.assertNotIn("go install", hint)
+            # a download page is plain text with the full link, not backticked like a
+            # command (Stage 7.7: backticks = pasteable)
+            self.assertEqual(plainsec.install_hint("gitleaks"), "To install: download it from "
+                             "https://github.com/gitleaks/gitleaks/releases.")
+            self.assertEqual(plainsec.install_hint("osv-scanner"), "To install: download it from "
+                             "https://github.com/google/osv-scanner/releases.")
 
     def test_missing_gitleaks_says_what_it_is_for(self):
         with mock.patch.object(plainsec.shutil, "which", return_value=None):
