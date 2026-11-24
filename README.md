@@ -59,7 +59,7 @@ NOT CHECKED, never as an all-clear.**
 | Scanner | Finds | Install |
 |---|---|---|
 | [bandit](https://github.com/PyCQA/bandit) | risky patterns in Python code | `pipx install bandit` |
-| [gitleaks](https://github.com/gitleaks/gitleaks) | leaked keys and passwords, **including in old commits** | `sudo apt install gitleaks`, or a [release](https://github.com/gitleaks/gitleaks/releases) |
+| [gitleaks](https://github.com/gitleaks/gitleaks) | leaked keys and passwords, **including in old commits** | a [release](https://github.com/gitleaks/gitleaks/releases), 8.30 or newer (Ubuntu's `apt install gitleaks` gives 8.16, which misses some secrets; the report says so when an older one ran) |
 | [osv-scanner](https://github.com/google/osv-scanner) | known vulnerabilities in **every** dependency file (Python, Rust, Node, Go…) | a [release](https://github.com/google/osv-scanner/releases) |
 | [pip-audit](https://github.com/pypa/pip-audit) | fallback for a top-level `requirements.txt` when osv-scanner isn't installed | `pipx install pip-audit` |
 | `cargo` | tells Rust crates used only by tests apart from ones that ship | comes with Rust |

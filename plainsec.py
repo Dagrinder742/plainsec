@@ -229,7 +229,9 @@ def on_termux():
 INSTALL = {
     # tool: (what it's for, Ubuntu/Debian command, Termux command)
     "gitleaks": ("finds leaked keys and passwords, including in old commits",
-                 "sudo apt install gitleaks",
+                 # not apt: Ubuntu's is 8.16.0, which missed a secret 8.30.1 finds
+                 # (real case Nov 24, trinity_master: 2 vs 3 possible secrets)
+                 "download it from github.com/gitleaks/gitleaks/releases",
                  "pkg install golang && go install github.com/zricethezav/gitleaks/v8@latest"),
     "osv-scanner": ("checks every dependency file for known vulnerabilities",
                     "download it from github.com/google/osv-scanner/releases",
