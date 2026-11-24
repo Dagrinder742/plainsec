@@ -10,7 +10,7 @@ and the exact command to fix it**.
 It's built for beginners and solo developers who find Snyk, Dependabot and raw scanner
 output overwhelming.
 
-> **Status: early (0.2.4), and I'm looking for feedback.** If you run it on a repo,
+> **Status: early (0.2.7), and I'm looking for feedback.** If you run it on a repo,
 > please [open an issue](https://github.com/Dagrinder742/plainsec/issues) and tell me
 > what confused you, what was wrong, or what was missing.
 
@@ -77,7 +77,7 @@ On Termux, or inside a virtual environment, use `pip install git+https://github.
 instead. (On Ubuntu 23.04+ and Debian 12+, a plain `pip install` outside a venv is refused
 on purpose; pipx gives plainsec its own environment.) To update later: `pipx upgrade
 plainsec`, or the same `pip install` with `--upgrade`. To install a fixed version, add its
-tag to the URL: `git+https://github.com/Dagrinder742/plainsec@v0.2.4`.
+tag to the URL: `git+https://github.com/Dagrinder742/plainsec@v0.2.7`.
 
 No other Python packages are needed; plainsec itself is a single standard-library file.
 The scanners in the table above are installed separately.
