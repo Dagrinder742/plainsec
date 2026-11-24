@@ -1329,7 +1329,41 @@ def scan_secrets(folder):
             leaks = json.loads(text) if text else []
         except (OSError, ValueError):
             return None, "couldn't read gitleaks' report"
-    return {"history": history, "leaks": leaks or []}, None
+    return {"history": history, "leaks": leaks or [], "version": gitleaks_version(),
+            "path": shutil.which("gitleaks")}, None
+
+
+GITLEAKS_MIN = (8, 30)
+
+
+def gitleaks_version():
+    """'8.30.1', or None when `gitleaks version` prints no number (Ubuntu's apt
+    build 8.16.0-1build2 prints "Version is set by build process")."""
+    try:
+        proc = subprocess.run(["gitleaks", "version"], capture_output=True, text=True)
+    except OSError:
+        return None
+    m = re.search(r"(?<![\d.])(\d+\.\d+(?:\.\d+)?)", proc.stdout or "")   # "8.30.1" or "v8.30.1"
+    return m.group(1) if m else None
+
+
+def old_gitleaks_note(info):
+    """One line for section 0 when the gitleaks that ran is older than 8.30 or
+    doesn't say its version; None otherwise (or when plainsec didn't run it)."""
+    if "version" not in info:          # --secrets-json: not run here, version unknown
+        return None
+    ver, path = info["version"], info.get("path")
+    at = f" (`{path}`)" if path else ""
+    if ver:
+        if tuple(int(p) for p in ver.split(".")[:2]) >= GITLEAKS_MIN:
+            return None
+        which = f"This scan used gitleaks {ver}{at}."
+    else:
+        which = (f"This scan used a gitleaks{at} that doesn't say its version "
+                 "(Ubuntu's apt build, 8.16.0, prints no number).")
+    return (f"{which} Versions older than 8.30 have older rules and can miss secrets "
+            f"that newer ones find, so this list may not be complete. "
+            + install_hint("gitleaks"))
 
 
 def parse_gitleaks(data, root=None):
@@ -1906,6 +1940,9 @@ def render_secrets(secrets, info, root=None):
     where = ("git history (every committed version; files never committed aren't included)"
              if info.get("history") else "the files as they are now (not a git repo)")
     out.append(f"Scanned: {where}. Secrets are never printed here.")
+    note = old_gitleaks_note(info)
+    if note:
+        out.append(note)
     if not secrets:
         return out + ["No secrets found.", ""]
     if info.get("history"):
