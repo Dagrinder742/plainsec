@@ -2025,17 +2025,44 @@ class TestNpmAdvice(unittest.TestCase):
         self.assertNotIn("npm install minimist", how)
         self.assertIn("isn't in your package.json", how)
         self.assertIn("`cd ~/NodeGoat && npm ls minimist --package-lock-only`", how)
-        # Verified Nov 23 on the NodeGoat clone (Termux npm 12.2.3): `npm audit fix
-        # --package-lock-only` changed only package-lock.json (no node_modules); a
-        # rescan went 131 → 82 risky (92 → 55 high/critical), minimist copies 12 → 7.
-        self.assertIn("`cd ~/NodeGoat && npm audit fix --package-lock-only`", how)
-        self.assertIn("sends your package list to npm's servers", how)
+        # `npm audit fix` is said once per lock file (render_deps), not per entry
+        self.assertNotIn("npm audit fix", how)
         # a package from package.json keeps the direct command
         d2 = dict(d, name="marked", version="0.3.5", fix_to="4.0.10", direct=True)
         self.assertIn("`cd ~/NodeGoat && npm install marked@4.0.10`", plainsec.dep_how(d2, root=root))
         # unknown (no package.json found): the old wording, nothing claimed
         d3 = dict(d); d3.pop("direct")
         self.assertIn("npm install minimist@0.2.4", plainsec.dep_how(d3, root=root))
+
+    def test_npm_audit_fix_said_once_per_lock_file(self):
+        # Real case (NodeGoat, Nov 23): the `npm audit fix --package-lock-only`
+        # sentence was in every pulled-in entry, 117 times in one report.
+        # Verified on the NodeGoat clone (Termux npm 12.2.3): it changed only
+        # package-lock.json (no node_modules); a rescan went 131 → 82 risky (92 → 55
+        # high/critical), minimist copies 12 → 7. npm 12 refused it first with
+        # EALLOWREMOTE (old lock with URL entries); --allow-remote=all got past it.
+        root = Path.home() / "NodeGoat"
+        base = {"ecosystem": "npm", "severity": "HIGH", "ids": ["GHSA-x"], "fix_to": "9.9.9",
+                "summary": "Bad thing", "direct": False}
+        deps = [dict(base, name=n, version="1.0.0", source="package-lock.json")
+                for n in ("minimist", "lodash", "qs")]
+        deps.append(dict(base, name="marked", version="0.3.5", source="package-lock.json",
+                         direct=True))
+        deps.append(dict(base, name="ms", version="0.7.0", source="web/package-lock.json"))
+        deps.append(dict(base, name="a", version="1.0.0", source="api/package-lock.json",
+                         direct=True))                       # only direct ones: no note
+        deps.append(dict(base, name="b", version="1.0.0", source="y/yarn.lock"))  # not npm's lock
+        text = "\n".join(plainsec.render_deps(deps, False, {"tool": "osv-scanner"}, root=root))
+        self.assertEqual(text.count("npm audit fix --package-lock-only"), 2, text)
+        self.assertIn("`cd ~/NodeGoat && npm audit fix --package-lock-only`", text)
+        self.assertIn("`cd ~/NodeGoat/web && npm audit fix --package-lock-only`", text)
+        self.assertNotIn("~/NodeGoat/api && npm audit", text)
+        self.assertNotIn("~/NodeGoat/y && npm audit", text)
+        self.assertEqual(text.count("sends your package list to npm's servers"), 2)
+        self.assertEqual(text.count("EALLOWREMOTE"), 2)
+        self.assertIn("--allow-remote=all", text)
+        # each entry still says how to find what pulls it in
+        self.assertIn("`cd ~/NodeGoat && npm ls minimist --package-lock-only`", text)
 
     def test_npm_direct_deps_reads_every_dependency_list(self):
         with tempfile.TemporaryDirectory() as tmp:

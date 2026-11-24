@@ -836,14 +836,10 @@ def _dep_how(d, root=None):
             # packages; `npm install minimist@…` only adds a new top-level one.
             # `npm ls --package-lock-only` reads the lock, no install needed.
             loc = "" if folder in ("", ".") or cd is not None else f" in `{folder}`"
-            # npm audit fix: verified on NodeGoat (only package-lock.json changed, no
-            # node_modules; 131 → 82 risky on rescan). It sends the package list to npm.
+            # `npm audit fix` is said once per lock file: npm_audit_note()
             return (f"`{name}` isn't in your package.json: other packages pull it in. To see "
                     f"which, run `{cd or ''}npm ls {name} --package-lock-only`{loc}, then "
-                    "update those packages (the names right under your project). "
-                    f"`{cd or ''}npm audit fix --package-lock-only`{loc} updates the ones it "
-                    "safely can in package-lock.json without installing anything (it sends "
-                    "your package list to npm's servers)")
+                    "update those packages (the names right under your project).")
         return f"{where}`{cd or ''}npm install {name}@{to}`"
     if eco == "Go":
         after = go_after_release(to)
@@ -2003,6 +1999,29 @@ def test_only_heading(n):
             "your program."]
 
 
+def npm_audit_note(src, items, root=None):
+    """Once per npm lock file with pulled-in packages (real case: NodeGoat said it
+    117 times, once per entry). Verified on NodeGoat: only package-lock.json changed,
+    no node_modules; 131 → 82 risky on rescan. npm 12 (Termux 12.2.3) refused that
+    old lock first with EALLOWREMOTE (URL-style entries; allow-remote=none is npm
+    12's default); --allow-remote=all got past it. Only npm's own lock files: for
+    yarn / pnpm / bun locks the command would edit a file the project doesn't use."""
+    if Path(src).name not in ("package-lock.json", "npm-shrinkwrap.json"):
+        return None
+    if not any(d.get("ecosystem") == "npm" and d.get("direct") is False for d in items):
+        return None
+    folder = str(Path(src).parent)
+    cd = _run_in(root, folder) or ""
+    loc = "" if folder in ("", ".") or cd else f" in `{folder}`"
+    return (f"For the packages below that your package.json doesn't list, "
+            f"`{cd}npm audit fix --package-lock-only`{loc} updates the ones it safely can "
+            f"in `{Path(src).name}` without installing anything (it sends your package "
+            "list to npm's servers). npm 12 or newer may refuse an old lock file that "
+            "lists packages by web address (error EALLOWREMOTE); adding "
+            "`--allow-remote=all` lets it go on, but then npm downloads from those "
+            "addresses, so look at them in the lock file first.")
+
+
 def render_deps(deps, failed, info, root=None):
     out = ["## 1. Dependencies"]
     if failed:
@@ -2079,6 +2098,9 @@ def render_deps(deps, failed, info, root=None):
         hint = archive_hint(src)
         if hint:
             out.append(hint)
+        note = npm_audit_note(src, items, root)
+        if note:
+            out.append(note)
         ships = [d for d in items if d.get("ships") is not False]
         tests = [d for d in items if d.get("ships") is False]
         for d in ships:
