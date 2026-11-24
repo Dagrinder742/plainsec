@@ -17,18 +17,30 @@ from pathlib import Path
 import plainsec
 
 _STATE_TMP = None
+_INPUTS_TMP = None
 
 
 def setUpModule():
     """Keep every test's scan history in a throwaway folder, never ~/.local/state."""
-    global _STATE_TMP
+    global _STATE_TMP, _INPUTS_TMP
     _STATE_TMP = tempfile.TemporaryDirectory()
+    _INPUTS_TMP = tempfile.TemporaryDirectory()
     os.environ["PLAINSEC_STATE_DIR"] = _STATE_TMP.name
 
 
 def tearDownModule():
     os.environ.pop("PLAINSEC_STATE_DIR", None)
     _STATE_TMP.cleanup()
+    _INPUTS_TMP.cleanup()
+
+
+def no_leaks():
+    """An empty gitleaks report for --secrets-json, kept outside the scanned folder:
+    no test runs a real scanner (like cargo). 8.30.1 takes ~0.45 s to start, and
+    17 tests running it made the suite 2 s → 38 s."""
+    g = Path(_INPUTS_TMP.name, "no-leaks.json")
+    g.write_text("[]")
+    return g
 
 BANDIT_SAMPLE = {
     "errors": [],
@@ -288,11 +300,13 @@ class TestIgnoreFile(unittest.TestCase):
             Path(tmp, ".plainsec").write_text("tools/\n")
             b = Path(tmp, "b.json"); b.write_text(json.dumps(data))
             a = Path(tmp, "a.json"); a.write_text('{"dependencies": []}')
+            g = no_leaks()
             for extra, expect_in, expect_out in [([], "skipped by .plainsec", "B602 · HIGH"),
                                                  (["--all"], "B602 · HIGH", "skipped by")]:
                 out = io.StringIO()
                 with contextlib.redirect_stdout(out):
-                    plainsec.main([tmp, "--bandit-json", str(b), "--audit-json", str(a)] + extra)
+                    plainsec.main([tmp, "--bandit-json", str(b), "--audit-json", str(a),
+                                   "--secrets-json", str(g)] + extra)
                 self.assertIn(expect_in, out.getvalue(), extra)
                 self.assertNotIn(expect_out, out.getvalue(), extra)
 
@@ -362,9 +376,11 @@ class TestSinceLastScan(unittest.TestCase):
         b.write_text(json.dumps({"results": results}))
         a = self.dir / "a.json"
         a.write_text(json.dumps({"dependencies": deps or []}))
+        g = no_leaks()
         out = io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
-            plainsec.main([str(self.dir), "--bandit-json", str(b), "--audit-json", str(a), *extra])
+            plainsec.main([str(self.dir), "--bandit-json", str(b), "--audit-json", str(a),
+                           "--secrets-json", str(g), *extra])
         return out.getvalue()
 
     def test_flagged_line_text(self):
@@ -1540,10 +1556,12 @@ class TestTermuxWording(unittest.TestCase):
                 finding("B110", str(root / "tests/b.py"), 4),
                 finding("B110", str(root / "src/deep/b.py"), 4)]}))
             a = root / "a.json"; a.write_text(json.dumps({"dependencies": []}))
+            g = no_leaks()
             out = io.StringIO()
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()), \
                  mock.patch.dict(os.environ, {"PLAINSEC_STATE_DIR": tmp}):
-                plainsec.main([str(root), "--bandit-json", str(b), "--audit-json", str(a)])
+                plainsec.main([str(root), "--bandit-json", str(b), "--audit-json", str(a),
+                               "--secrets-json", str(g)])
             out = out.getvalue()
             self.assertIn("`src/deep/a.py` — line 3", out)          # not lost to the skip
             self.assertIn("`tools/` — 1 finding", out)
@@ -1578,10 +1596,11 @@ class TestCli(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             b = Path(tmp, "b.json"); b.write_text(json.dumps(BANDIT_SAMPLE))
             a = Path(tmp, "a.json"); a.write_text(json.dumps(AUDIT_SAMPLE))
+            g = no_leaks()
             out = Path(tmp, "r.md")
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                code = plainsec.main([tmp, "--bandit-json", str(b),
-                                      "--audit-json", str(a), "--out", str(out)])
+                code = plainsec.main([tmp, "--bandit-json", str(b), "--audit-json", str(a),
+                                      "--secrets-json", str(g), "--out", str(out)])
             self.assertEqual(code, 1)
             self.assertIn("# Security report", out.read_text())
 
