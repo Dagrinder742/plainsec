@@ -1338,41 +1338,73 @@ def scan_secrets(folder):
             leaks = json.loads(text) if text else []
         except (OSError, ValueError):
             return None, "couldn't read gitleaks' report"
-    return {"history": history, "leaks": leaks or [], "version": gitleaks_version(),
-            "path": shutil.which("gitleaks")}, None
+    path = shutil.which("gitleaks")
+    return {"history": history, "leaks": leaks or [], "version": gitleaks_version(path),
+            "path": path}, None
 
 
 GITLEAKS_MIN = (8, 30)
+# Go build info: `go version -m` prints "\tmod\tgithub.com/zricethezav/gitleaks/v8\tv8.30.1\th1:…";
+# the binary holds the same "mod\t…\tv8.30.1" text. Real cases: a `go install`
+# 8.30.1 (Termux, proot Ubuntu) has it; the release 8.30.1 says "(devel)" there
+# but prints its number; Ubuntu's apt 8.16.0 has no build info at all.
+GITLEAKS_MOD = re.compile(r"\bmod\s+github\.com/(?:zricethezav|gitleaks)/gitleaks/v8\s+v(\d+\.\d+(?:\.\d+)?)")
+GITLEAKS_MOD_BYTES = re.compile(GITLEAKS_MOD.pattern.encode())
+VERSION_NUMBER = re.compile(r"(?<![\d.])(\d+\.\d+(?:\.\d+)?)")   # "8.30.1" or "v8.30.1"
 
 
-def gitleaks_version():
-    """'8.30.1', or None when `gitleaks version` prints no number (Ubuntu's apt
-    build 8.16.0-1build2 prints "Version is set by build process")."""
+def gitleaks_version(path):
+    """'8.30.1', or None when nothing says which version it is.
+    1. `gitleaks version` (a `go install` build and Ubuntu's apt build print
+       "version is set by build process", no number);
+    2. `go version -m <path>`, if go is installed;
+    3. the module line in the binary itself (when go isn't installed)."""
+    def run(cmd):
+        try:
+            return subprocess.run(cmd, capture_output=True, text=True).stdout or ""
+        except OSError:
+            return ""
+    m = VERSION_NUMBER.search(run([path or "gitleaks", "version"]))
+    if m:
+        return m.group(1)
+    if not path:
+        return None
+    if shutil.which("go"):
+        m = GITLEAKS_MOD.search(run(["go", "version", "-m", path]))
+        if m:
+            return m.group(1)
     try:
-        proc = subprocess.run(["gitleaks", "version"], capture_output=True, text=True)
+        data = Path(path).read_bytes()
     except OSError:
         return None
-    m = re.search(r"(?<![\d.])(\d+\.\d+(?:\.\d+)?)", proc.stdout or "")   # "8.30.1" or "v8.30.1"
-    return m.group(1) if m else None
+    # A plain find first, the regex only around each hit: a regex over the whole
+    # 7 MB took 0.1–0.3 s per scan.
+    i = data.find(b"/gitleaks/v8\tv")
+    while i != -1:
+        m = GITLEAKS_MOD_BYTES.search(data, max(0, i - 40), i + 40)
+        if m:
+            return m.group(1).decode()
+        i = data.find(b"/gitleaks/v8\tv", i + 1)
+    return None
 
 
 def old_gitleaks_note(info):
-    """One line for section 0 when the gitleaks that ran is older than 8.30 or
-    doesn't say its version; None otherwise (or when plainsec didn't run it)."""
-    if "version" not in info:          # --secrets-json: not run here, version unknown
+    """One line for section 0 when the gitleaks that ran is older than 8.30, or
+    when its version couldn't be told; None otherwise (or with --secrets-json,
+    where plainsec didn't run it)."""
+    if "version" not in info:
         return None
     ver, path = info["version"], info.get("path")
     at = f" (`{path}`)" if path else ""
-    if ver:
-        if tuple(int(p) for p in ver.split(".")[:2]) >= GITLEAKS_MIN:
-            return None
-        which = f"This scan used gitleaks {ver}{at}."
-    else:
-        which = (f"This scan used a gitleaks{at} that doesn't say its version "
-                 "(Ubuntu's apt build, 8.16.0, prints no number).")
-    return (f"{which} Versions older than 8.30 have older rules and can miss secrets "
-            f"that newer ones find, so this list may not be complete. "
-            + install_hint("gitleaks"))
+    if not ver:
+        return (f"Couldn't tell which gitleaks version ran{at}. Versions older than "
+                "8.30 have older rules and can miss secrets that newer ones find. To get "
+                f"8.30 or newer: {install_how('gitleaks')}.")
+    if tuple(int(p) for p in ver.split(".")[:2]) >= GITLEAKS_MIN:
+        return None
+    return (f"This scan used gitleaks {ver}{at}, which is older than 8.30: older versions "
+            "have older rules and can miss secrets that newer ones find, so this list "
+            f"may not be complete. To get 8.30 or newer: {install_how('gitleaks')}.")
 
 
 def parse_gitleaks(data, root=None):

@@ -806,9 +806,12 @@ class TestSecrets(unittest.TestCase):
         self.assertFalse(data["history"]); self.assertTrue(data2["history"])
 
     @staticmethod
-    def fake_gitleaks(version_out, calls=None, leaks="[]"):
-        """`gitleaks version` prints version_out; `gitleaks detect` writes leaks."""
+    def fake_gitleaks(version_out, calls=None, leaks="[]", go_out=None):
+        """`gitleaks version` prints version_out; `gitleaks detect` writes leaks;
+        `go version -m <path>` prints go_out."""
         def fake_run(cmd, **kw):
+            if cmd[:3] == ["go", "version", "-m"]:
+                return mock.Mock(returncode=0, stdout=go_out or "", stderr="")
             if cmd[1:2] == ["version"]:
                 return mock.Mock(returncode=0, stdout=version_out + "\n", stderr="")
             if calls is not None:
@@ -817,27 +820,65 @@ class TestSecrets(unittest.TestCase):
             return mock.Mock(returncode=0, stdout="", stderr="")
         return fake_run
 
+    @staticmethod
+    def which(gitleaks="/usr/bin/gitleaks", go=None):
+        return lambda name: {"gitleaks": gitleaks, "go": go}.get(name)
+
     def test_gitleaks_version_read(self):
-        # Ubuntu's apt build (8.16.0-1build2) prints this instead of a number.
         for out, want in (("8.30.1", "8.30.1"), ("v8.16.0", "8.16.0"),
-                          ("Version is set by build process", None)):
-            with mock.patch.object(plainsec.shutil, "which", return_value="/x/gitleaks"), \
+                          ("version is set by build process", None)):
+            with mock.patch.object(plainsec.shutil, "which", side_effect=self.which("/x/gitleaks")), \
                  mock.patch.object(plainsec.subprocess, "run", side_effect=self.fake_gitleaks(out)):
                 data, err = plainsec.scan_secrets(self.dir)
             self.assertIsNone(err)
             self.assertEqual(data["version"], want, out)
 
-    def run_scanned(self, version_out, leaks):
-        """main() running (fake) gitleaks itself, not --secrets-json."""
+    def test_no_number_version_from_go_or_binary(self):
+        bin_ = self.dir / "gitleaks"
+        def version(go_out=None, binary=b""):
+            bin_.write_bytes(binary)
+            with mock.patch.object(plainsec.shutil, "which",
+                                   side_effect=self.which(str(bin_), "/usr/bin/go" if go_out else None)), \
+                 mock.patch.object(plainsec.subprocess, "run",
+                                   side_effect=self.fake_gitleaks(self.NO_NUMBER, go_out=go_out)):
+                return plainsec.gitleaks_version(str(bin_))
+        self.assertEqual(version(go_out=self.GO_M_8301), "8.30.1")
+        # no go: the same module line is in the binary (go install build)
+        self.assertEqual(version(binary=b"\x00junk\x7fmod\tgithub.com/zricethezav/gitleaks/v8"
+                                        b"\tv8.30.1\th1:abc=\n\x00"), "8.30.1")
+        # release builds say "dep ... (devel)" there: not a version
+        self.assertIsNone(version(binary=b"dep\tgithub.com/zricethezav/gitleaks/v8\t(devel)\t\n"))
+        # Ubuntu's apt 8.16.0: no build info at all
+        self.assertIsNone(version(binary=b"\x7fELF no module text here"))
+
+    def run_scanned(self, version_out, leaks, go_out=None, gitleaks="/usr/bin/gitleaks"):
+        """main() running (fake) gitleaks itself, not --secrets-json. `go` is on
+        PATH only when go_out is given."""
         (self.dir / ".git").mkdir(exist_ok=True)
         out = io.StringIO()
-        with mock.patch.object(plainsec.shutil, "which", return_value="/usr/bin/gitleaks"), \
+        with mock.patch.object(plainsec.shutil, "which",
+                               side_effect=self.which(gitleaks, "/usr/bin/go" if go_out else None)), \
              mock.patch.object(plainsec.subprocess, "run",
-                               side_effect=self.fake_gitleaks(version_out, leaks=json.dumps(leaks))), \
+                               side_effect=self.fake_gitleaks(version_out, leaks=json.dumps(leaks),
+                                                              go_out=go_out)), \
              contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
             rc = plainsec.main([str(self.dir), "--bandit-json", str(self.dir / "b.json"),
                                 "--audit-json", str(self.dir / "a.json"), "--no-save"])
         return rc, out.getvalue()
+
+    # Real output, phone (proot Ubuntu), gitleaks 8.30.1 built with `go install`:
+    NO_NUMBER = "version is set by build process"
+    GO_M_8301 = ("/root/go/bin/gitleaks: go1.26.8\n"
+                 "\tpath\tgithub.com/zricethezav/gitleaks/v8\n"
+                 "\tmod\tgithub.com/zricethezav/gitleaks/v8\tv8.30.1\th1:…\n")
+
+    def test_no_number_but_go_says_8_30_1_is_not_called_old(self):
+        # Counter-example: Termux/proot `go install` 8.30.1 prints no number either
+        # (handover Stage 6.5); `go version -m` shows it's 8.30.1. No warning.
+        leaks = [leak("generic-api-key", "a.py", 3, "c1")]
+        _, out = self.run_scanned(self.NO_NUMBER, leaks, go_out=self.GO_M_8301)
+        self.assertNotIn("older than 8.30", out)
+        self.assertNotIn("couldn't tell which gitleaks version ran", out)
 
     def test_old_gitleaks_named_in_section_0(self):
         # Real case (Nov 24, trinity_master @ 1e4c2d8): apt's gitleaks 8.16.0 found 2
@@ -846,19 +887,24 @@ class TestSecrets(unittest.TestCase):
         leaks = [leak("generic-api-key", "a.py", 3, "c1")]
         rc_new, new = self.run_scanned("8.30.1", leaks)
         rc_old, old = self.run_scanned("8.16.0", leaks)
-        rc_none, none = self.run_scanned("Version is set by build process", leaks)
+        # no number, no go, and no module line in the binary (Ubuntu's apt 8.16.0)
+        rc_none, none = self.run_scanned(self.NO_NUMBER, leaks, gitleaks="/nonexistent/gitleaks")
+        self.assertIn("This scan used gitleaks 8.16.0 (`/usr/bin/gitleaks`), which is older "
+                      "than 8.30", old)
+        self.assertIn("Couldn't tell which gitleaks version ran (`/nonexistent/gitleaks`).", none)
+        self.assertNotIn("older than 8.30:", none)        # no claim that it's old
+        self.assertNotIn("This scan used", new); self.assertNotIn("Couldn't tell", new)
         for out in (old, none):
-            self.assertIn("older than 8.30", out)
             self.assertIn("can miss secrets", out)
-            self.assertIn("github.com/gitleaks/gitleaks/releases", out)
-        self.assertIn("gitleaks 8.16.0 (`/usr/bin/gitleaks`)", old)
-        self.assertIn("doesn't say its version", none)
-        self.assertNotIn("older than 8.30", new)
+            self.assertIn("To get 8.30 or newer: download it from "
+                          "https://github.com/gitleaks/gitleaks/releases.", out)
+            self.assertNotIn("Ubuntu", out)
+            self.assertNotIn("`download it", out)
         # one line in section 0, nothing else changes: counts, exit code
         for out in (old, none):
             sec0 = out.split("## 0.")[1].split("## 1.")[0]
-            self.assertIn("older than 8.30", sec0)
-            self.assertEqual(out.count("older than 8.30"), 1)
+            self.assertIn("can miss secrets", sec0)
+            self.assertEqual(out.count("can miss secrets"), 1)
             self.assertEqual(len(out.splitlines()), len(new.splitlines()) + 1)
         self.assertEqual(rc_old, rc_new); self.assertEqual(rc_none, rc_new)
         head = lambda o: [l for l in o.splitlines() if l.startswith("**")][0]
@@ -872,8 +918,7 @@ class TestSecrets(unittest.TestCase):
     def test_no_version_line_with_saved_gitleaks_json(self):
         # --secrets-json: plainsec didn't run gitleaks, so it can't know the version
         _, out = self.run_with([leak("github-pat", "a.py", 3, "c1")])
-        self.assertNotIn("older than 8.30", out)
-        self.assertNotIn("doesn't say its version", out)
+        self.assertNotIn("can miss secrets", out)
 
 
 def osv_vuln(vid, name, fixed=None, summary="", aliases=(), informational=False,
